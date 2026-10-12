@@ -1,0 +1,136 @@
+#!/bin/sh
+set -eu
+CC=${CC:-cc}
+CPPFLAGS=${CPPFLAGS:-}
+CFLAGS=${CFLAGS:--O2}
+LDFLAGS=${LDFLAGS:-}
+LDLIBS=${LDLIBS:-}
+PREFIX=${PREFIX:-/usr/local}
+case ${1:-} in --prefix=*) PREFIX=${1#--prefix=};; '') ;; *) printf 'usage: sh configure [--prefix=PATH]\n' >&2; exit 1;; esac
+case $PREFIX in /*) ;; *) printf 'configure: prefix must be absolute\n' >&2; exit 1;; esac
+# A real DSO and dynamically linked commands are required; static workloads
+# in the test suite are separate and retain their own -static flags.
+case " $CPPFLAGS $CFLAGS $LDFLAGS $LDLIBS " in
+    *' -static '*|*' -static-pie '*|*' -Wl,-static '*|*' -Wl,-Bstatic '*|*' -Wl,--static '*)
+        printf 'configure: -static is unsupported for the shared core/commands\n' >&2; exit 1;;
+esac
+probe=.configure.$$
+if ! mkdir "$probe"; then printf 'configure: scratch directory collision\n' >&2; exit 1; fi
+trap 'rm -rf "$probe"' 0
+trap 'exit 1' 1 2 3 15
+printf 'int main(void) { return 0; }\n' > "$probe/probe.c"
+# Compile and link only; never execute the target.
+if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -o "$probe/probe"; then
+    printf 'configure: compiler/linker probe failed\n' >&2; exit 1
+fi
+printf '#include <openssl/ssl.h>\n#include <openssl/evp.h>\n#include <zlib.h>\nint main(void) { SSL_CTX *c=SSL_CTX_new(TLS_client_method()); SSL_CTX_free(c); return EVP_sha256()==0 || zlibVersion()==0; }\n' > "$probe/probe.c"
+if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -lssl -lcrypto -lz -o "$probe/probe"; then
+    printf 'configure: OpenSSL and zlib development libraries required\n' >&2; exit 1
+fi
+# Discover the target format and linker conventions by compiling/linking only.
+cat > "$probe/format.c" <<'EOF'
+#ifndef __ELF__
+#error not ELF
+#endif
+int geranium_probe(void) { return 0; }
+EOF
+if "$CC" $CPPFLAGS $CFLAGS -c "$probe/format.c" -o "$probe/format.o" >/dev/null 2>&1; then
+    format=elf
+    library=libgeranium.so
+    exports=src/geranium.map
+    runpath_flags="-Wl,-rpath,'\$\$ORIGIN:\$\$ORIGIN/../lib'"
+    loader_path='$ORIGIN:$ORIGIN/../lib'
+else
+    cat > "$probe/format.c" <<'EOF'
+#if !defined(__APPLE__) || !defined(__MACH__)
+#error not Mach-O
+#endif
+int geranium_probe(void) { return 0; }
+EOF
+    if ! "$CC" $CPPFLAGS $CFLAGS -c "$probe/format.c" -o "$probe/format.o"; then
+        printf 'configure: supported shared-library formats are ELF and Mach-O\n' >&2; exit 1
+    fi
+    format=macho
+    library=libgeranium.dylib
+    exports=src/geranium.exports
+    runpath_flags='-Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../lib'
+fi
+picflags=-fPIC
+if ! "$CC" $CPPFLAGS $CFLAGS $picflags -c "$probe/format.c" -o "$probe/shared.o"; then
+    picflags=-KPIC
+    if ! "$CC" $CPPFLAGS $CFLAGS $picflags -c "$probe/format.c" -o "$probe/shared.o"; then
+        printf 'configure: position-independent compilation unavailable\n' >&2; exit 1
+    fi
+fi
+if [ "$format" = elf ]; then
+    printf '{ global: geranium_probe; local: *; };\n' > "$probe/exports"
+    shared_flags='-shared -Wl,-soname,libgeranium.so -Wl,--version-script,'
+    if "$CC" $CFLAGS $LDFLAGS $shared_flags"$probe/exports" "$probe/shared.o" $LDLIBS -o "$probe/$library"; then
+        shared_flags=$shared_flags$exports
+    else
+        # illumos/Solaris link-editor with its native mapfile convention.
+        shared_flags='-G -Wl,-h,libgeranium.so -Wl,-M,'
+        if ! "$CC" $CFLAGS $LDFLAGS $shared_flags"$probe/exports" "$probe/shared.o" $LDLIBS -o "$probe/$library"; then
+            printf 'configure: ELF shared linking with SONAME/export map unavailable\n' >&2; exit 1
+        fi
+        shared_flags=$shared_flags$exports
+    fi
+else
+    printf '_geranium_probe\n' > "$probe/exports"
+    shared_flags='-dynamiclib -Wl,-install_name,@rpath/libgeranium.dylib -Wl,-exported_symbols_list,'
+    if ! "$CC" $CFLAGS $LDFLAGS $shared_flags"$probe/exports" "$probe/shared.o" $LDLIBS -o "$probe/$library"; then
+        printf 'configure: Mach-O shared linking with install name/export list unavailable\n' >&2; exit 1
+    fi
+    shared_flags=$shared_flags$exports
+fi
+printf 'int geranium_probe(void); int main(void) { return geranium_probe(); }\n' > "$probe/probe.c"
+if [ "$format" = elf ]; then
+    set -- -Wl,-rpath,"$loader_path"
+else
+    set -- -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../lib
+fi
+if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS "$@" -L"$probe" -lgeranium $LDLIBS -o "$probe/probe"; then
+    printf 'configure: relative shared-library loader path probe failed\n' >&2; exit 1
+fi
+case ${GERANIUM_BACKEND:-auto} in
+    linux|unsupported) backend=$GERANIUM_BACKEND ;;
+    auto)
+        printf '#define _GNU_SOURCE\n#include <sched.h>\n#include <sys/mount.h>\n#include <sys/syscall.h>\nint main(void) { return CLONE_NEWUSER == 0 || CLONE_NEWNS == 0 || CLONE_NEWPID == 0 || SYS_pivot_root == 0 || SYS_pidfd_open == 0 || SYS_pidfd_send_signal == 0; }\n' > "$probe/probe.c"
+        if "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -o "$probe/probe" >/dev/null 2>&1; then backend=linux; else backend=unsupported; fi ;;
+    *) printf 'configure: invalid GERANIUM_BACKEND\n' >&2; exit 1;;
+esac
+{
+    printf 'CC = %s\nCPPFLAGS = %s\nCFLAGS = %s\nLDFLAGS = %s\nLDLIBS = %s\nPREFIX = %s\nDESTDIR =\n' "$CC" "$CPPFLAGS" "$CFLAGS" "$LDFLAGS" "$LDLIBS" "$PREFIX"
+    printf 'BACKEND = src/backend_%s.c\n' "$backend"
+    printf 'LIBRARY = %s\nEXPORTS = %s\nPICFLAGS = %s\nSHARED_FLAGS = %s\nRUNPATH_FLAGS = %s\n' "$library" "$exports" "$picflags" "$shared_flags" "$runpath_flags"
+    printf '%s\n' 'CORE_OBJECTS = geranium.o image.o registry.o json.o layer.o backend.o' 'PROGRAMS = gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi' 'all: $(LIBRARY) $(PROGRAMS)'
+    printf '%s\n' '$(LIBRARY): $(CORE_OBJECTS) $(EXPORTS) Makefile'
+    printf '\t%s\n' '"$(CC)" $(CFLAGS) $(LDFLAGS) $(SHARED_FLAGS) -o $@ $(CORE_OBJECTS) $(LDLIBS) -lssl -lcrypto -lz'
+    for core in geranium image registry json layer backend; do
+        source="src/$core.c"
+        if [ "$core" = backend ]; then source='$(BACKEND)'; fi
+        printf '%s.o: %s src/geranium.h src/image.h src/registry.h src/json.h src/layer.h src/backend.h Makefile\n' "$core" "$source"
+        printf '\t"$(CC)" $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -std=c99 -Wall -Wextra -c %s -o $@\n' "$source"
+    done
+    for verb in create start run stop inspect logs rm pull rmi; do
+        printf 'gu-%s: src/%s.c src/geranium.h src/cli.h $(LIBRARY) Makefile\n' "$verb" "$verb"
+        printf '\t"$(CC)" $(CPPFLAGS) $(CFLAGS) -std=c99 -Wall -Wextra -o $@ src/%s.c $(LDFLAGS) $(RUNPATH_FLAGS) -L. -lgeranium $(LDLIBS)\n' "$verb"
+    done
+    printf '%s\n' 'CLANG_FORMAT = clang-format' 'fmt:'
+    printf '\t%s\n' '"$(CLANG_FORMAT)" -i src/*.c src/*.h tests/*.c'
+    printf '%s\n' 'check-format:'
+    printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c'
+    printf '%s\n' 'test: all'
+    for script in library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race; do
+        printf '\tMAKE="$(MAKE)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LDLIBS="$(LDLIBS)" sh tests/%s.sh\n' "$script"
+    done
+    printf '%s\n' 'install: all'
+    printf '\t%s\n' 'mkdir -p "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib" "$(DESTDIR)$(PREFIX)/include"' 'cp $(PROGRAMS) "$(DESTDIR)$(PREFIX)/bin/"' 'cp $(LIBRARY) "$(DESTDIR)$(PREFIX)/lib/"' 'cp src/geranium.h "$(DESTDIR)$(PREFIX)/include/geranium.h"'
+    printf '%s\n' 'clean:'
+    printf '\t%s\n' 'rm -f $(PROGRAMS) libgeranium.so libgeranium.dylib $(CORE_OBJECTS)'
+} > Makefile
+# bmake and coarse filesystems can treat a new configuration as the same timestamp.
+# Invalidate only this build's products after all probes and Makefile creation succeed.
+rm -f geranium.o image.o registry.o json.o layer.o backend.o libgeranium.so libgeranium.dylib \
+    gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi
+printf 'configured for %s backend, %s shared library with %s\n' "$backend" "$format" "$CC"

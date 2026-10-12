@@ -1,0 +1,14 @@
+{
+    global:
+        geranium_open_state_root;
+        geranium_create;
+        geranium_start;
+        geranium_run;
+        geranium_stop;
+        geranium_inspect;
+        geranium_logs;
+        geranium_rm;
+        geranium_pull;
+        geranium_rmi;
+    local: *;
+};

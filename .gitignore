@@ -1,0 +1,8 @@
+/Makefile
+/geranium
+/gu-*
+/*.o
+/libgeranium.so
+/libgeranium.dylib
+__pycache__/
+*.py[cod]

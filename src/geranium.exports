@@ -1,0 +1,10 @@
+_geranium_open_state_root
+_geranium_create
+_geranium_start
+_geranium_run
+_geranium_stop
+_geranium_inspect
+_geranium_logs
+_geranium_rm
+_geranium_pull
+_geranium_rmi

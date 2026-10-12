@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-musl:
+    name: Shared musl / BSD make / root and rootless isolation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # Preventive configuration for this ephemeral hosted runner; no hosted
+      # CI failure has been reproduced. Never apply to persistent/shared hosts.
+      - name: Prepare CI user namespaces
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Build and test
+        run: docker run --rm --privileged -v "$PWD:/src:ro" alpine:3.23 sh /src/tests/musl.sh
