@@ -96,12 +96,37 @@ Removal does not require container-reference accounting because copies share no
 inodes with images. Within each copy, validated image hardlinks remain hardlinks;
 the original rootfs interface still rejects hardlinked sources and sticky modes.
 
+Caller-side status messages use external skalibs `strerr` (`-lskarnet`) for
+plain newline-terminated stderr output. The API flushes each message and
+preserves errno; it is synchronous and not thread-safe, matching the existing
+process-lifetime entry points. Startup events follow the existing exec ACK,
+without new delays or state reads. Pull completion follows atomic publication
+or validated cache reuse. Messages contain fixed text and bounded layer counts,
+not credentials, tokens, references, or server response bodies. The bounded PID1
+fatal path and raw-byte container output capture remain unchanged. No public
+API, callback, logging configuration, or helper process is added.
+
 Registry transport is original POSIX socket code using system OpenSSL for verified
-TLS and SHA256, and zlib for gzip. No TLS cryptography, JSON dependency, curl,
-archive library, or third-party implementation is vendored. Anonymous Bearer
-challenge requests carry no credentials. Cross-origin redirects strip tokens;
+TLS and SHA256, zlib for gzip, and external yyjson for JSON decoding. No TLS
+cryptography, curl, archive library, or third-party implementation is vendored.
+Anonymous Bearer challenge requests carry no credentials. Cross-origin redirects strip tokens;
 HTTPS downgrade redirects fail. Resource bounds and the synchronous resolver's
 unbounded delay are explicit in README. No external runtime helper is introduced.
+
+Private image/registry code borrows yyjson values directly from an owning
+`yyjson_doc`; no separate JSON tree is built. The document stays alive until all
+borrowed values/strings have been consumed or copied. The installed geranium.h
+and exported ABI do not expose yyjson. A thin adapter rejects inputs over 1 MiB
+before decoding and checks the decoded tree for depth (root zero, maximum 32),
+32,768 values excluding keys, embedded NUL, and duplicate decoded keys at every
+depth. yyjson's strict defaults handle grammar, full-document consumption, and
+UTF-8/escape validation. `YYJSON_READ_NUMBER_AS_RAW` preserves numeric lexemes;
+the adapter retains the 64-byte number limit and accepts unsigned integers only
+as decimal digits within unsigned long long range. No permissive flags are used.
+Decode occurs before traversal budgets are checked, under the input-size bound.
+Duplicate checking uses yyjson's first-match object lookup, retaining the existing
+quadratic worst case for wide objects. The core links `-lyyjson`; distribution
+musl builds use the shared system library, without copying yyjson source.
 
 Two tar passes per verified layer first apply whiteouts to lower contents, then
 apply additions. This makes opaque semantics independent of tar entry order.
@@ -115,7 +140,7 @@ execve receives only the saved image environment. This is a bounded OCI subset,
 not broad OCI conformance or a hostile-workload isolation guarantee.
 
 Prefer libc, then Skarnet libraries for justified functionality.
-Minimal external TLS and compression dependencies are permitted.
+Minimal external TLS, compression, and JSON dependencies are permitted.
 Do not write TLS cryptography from scratch or copy third-party source under an incompatible license.
 
 ## Alternatives

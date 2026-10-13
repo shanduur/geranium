@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-apk add --no-cache build-base binutils bmake busybox-static python3 openssl-dev openssl-libs-static zlib-dev zlib-static ca-certificates openssl
+apk add --no-cache build-base binutils bmake busybox-static python3 openssl-dev openssl-libs-static zlib-dev zlib-static yyjson-dev skalibs-dev ca-certificates openssl
 mkdir /tmp/geranium-build
 cp -R /src/. /tmp/geranium-build/
 cd /tmp/geranium-build
@@ -12,6 +12,8 @@ bmake
 readelf -h libgeranium.so | grep 'Type:.*DYN'
 readelf -d libgeranium.so | grep '(SONAME).*\[libgeranium.so\]'
 readelf -d libgeranium.so | grep '(NEEDED).*libc.musl-'
+readelf -d libgeranium.so | grep '(NEEDED).*\[libyyjson.so'
+readelf -d libgeranium.so | grep '(NEEDED).*\[libskarnet.so'
 for v in create start run stop inspect logs rm pull rmi; do
     readelf -l "gu-$v" | grep 'interpreter: /lib/ld-musl-'
     readelf -d "gu-$v" | grep '(NEEDED).*\[libgeranium.so\]'

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <skalibs/strerr.h>
 
 #define MAX_ARGS GERANIUM_COMMAND_ARGS_MAX
 #define MAX_BYTES GERANIUM_COMMAND_BYTES_MAX
@@ -942,8 +943,10 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	}
 	if (detached) {
 		close(attachment);
+		strerr_warnn(2, "geranium: ", "started (detached)");
 		return 0;
 	}
+	strerr_warnn(2, "geranium: ", "started");
 	int result = follow(container, owner[1], statefd, name);
 	must(close(attachment), "close foreground attachment");
 	return result;
@@ -1100,6 +1103,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	close(container);
 	close(lock);
 	close(state);
+	strerr_warnn(2, "geranium: ", "created");
 	return 0;
 }
 int geranium_create(const char *root, enum geranium_source source_type,
@@ -1208,6 +1212,7 @@ int geranium_stop(const char *root, const char *name)
 	close(container);
 	close(lock);
 	close(state);
+	strerr_warnn(2, "geranium: ", "stopped");
 	return 0;
 }
 static int inspect_or_rm(const char *root, const char *name, bool remove)
@@ -1229,6 +1234,7 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 		reclaim_stage(state, stage);
 		must(close(lock), "close command lock");
 		must(close(state), "close state");
+		strerr_warnn(2, "geranium: ", "removed pending container");
 		return 0;
 	}
 	char status[64];
@@ -1262,6 +1268,7 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 	must(fsync(state), "sync removed container");
 	must(close(lock), "close command lock");
 	must(close(state), "close state");
+	strerr_warnn(2, "geranium: ", "removed container");
 	return 0;
 }
 int geranium_inspect(const char *root, const char *name)

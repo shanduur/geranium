@@ -27,6 +27,14 @@ printf '#include <openssl/ssl.h>\n#include <openssl/evp.h>\n#include <zlib.h>\ni
 if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -lssl -lcrypto -lz -o "$probe/probe"; then
     printf 'configure: OpenSSL and zlib development libraries required\n' >&2; exit 1
 fi
+printf '#include <yyjson.h>\nint main(void) { yyjson_doc *d=yyjson_read("0", 1, YYJSON_READ_NUMBER_AS_RAW); yyjson_doc_free(d); return 0; }\n' > "$probe/probe.c"
+if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -lyyjson -o "$probe/probe"; then
+    printf 'configure: yyjson development library required\n' >&2; exit 1
+fi
+printf '#include <skalibs/strerr.h>\nint main(void) { strerr_warnn(2, "geranium: ", "probe"); return 0; }\n' > "$probe/probe.c"
+if ! "$CC" $CPPFLAGS $CFLAGS "$probe/probe.c" $LDFLAGS $LDLIBS -lskarnet -o "$probe/probe"; then
+    printf 'configure: skalibs development library required\n' >&2; exit 1
+fi
 # Discover the target format and linker conventions by compiling/linking only.
 cat > "$probe/format.c" <<'EOF'
 #ifndef __ELF__
@@ -105,7 +113,7 @@ esac
     printf 'LIBRARY = %s\nEXPORTS = %s\nPICFLAGS = %s\nSHARED_FLAGS = %s\nRUNPATH_FLAGS = %s\n' "$library" "$exports" "$picflags" "$shared_flags" "$runpath_flags"
     printf '%s\n' 'CORE_OBJECTS = geranium.o image.o registry.o json.o layer.o backend.o' 'PROGRAMS = gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi' 'all: $(LIBRARY) $(PROGRAMS)'
     printf '%s\n' '$(LIBRARY): $(CORE_OBJECTS) $(EXPORTS) Makefile'
-    printf '\t%s\n' '"$(CC)" $(CFLAGS) $(LDFLAGS) $(SHARED_FLAGS) -o $@ $(CORE_OBJECTS) $(LDLIBS) -lssl -lcrypto -lz'
+    printf '\t%s\n' '"$(CC)" $(CFLAGS) $(LDFLAGS) $(SHARED_FLAGS) -o $@ $(CORE_OBJECTS) $(LDLIBS) -lssl -lcrypto -lz -lyyjson -lskarnet'
     for core in geranium image registry json layer backend; do
         source="src/$core.c"
         if [ "$core" = backend ]; then source='$(BACKEND)'; fi
@@ -121,7 +129,7 @@ esac
     printf '%s\n' 'check-format:'
     printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c'
     printf '%s\n' 'test: all'
-    for script in library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race; do
+    for script in dependencies json output library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race; do
         printf '\tMAKE="$(MAKE)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LDLIBS="$(LDLIBS)" sh tests/%s.sh\n' "$script"
     done
     printf '%s\n' 'install: all'

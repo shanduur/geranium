@@ -52,7 +52,7 @@ class Registry:
     def route(self,path,headers):
         if self.signed_host is not None and headers.get('Host')!=self.signed_host:
             return 403,{},b'signed Host mismatch'
-        if path.startswith('/token?'): return 200,{},encode(dict(token='fixture-token'))
+        if path.startswith('/token?'): return 200,{},getattr(self,'token_body',encode(dict(token='fixture-token')))
         if self.auth and headers.get('Authorization')!='Bearer fixture-token':
             scheme='https' if self.tls else 'http'
             return 401,{'WWW-Authenticate':f'Bearer realm="{scheme}://127.0.0.1:{self.server.server_port}/token",service="fixture",scope="repository:fixture:pull"'},b''
@@ -475,7 +475,7 @@ def authority():
         for flags in ('CPPFLAGS','CFLAGS'): command+=shlex.split(os.environ.get(flags,'-O2 -Wall -Wextra -Werror -pedantic' if flags=='CFLAGS' else ''))
         command+=['-std=c99',str(BASE/'tests/registry-authority.c'),str(BASE/'src/json.c')]
         for flags in ('LDFLAGS','LDLIBS'): command+=shlex.split(os.environ.get(flags,''))
-        subprocess.run(command+['-lssl','-lcrypto','-o',str(helper)],check=True)
+        subprocess.run(command+['-lssl','-lcrypto','-lyyjson','-o',str(helper)],check=True)
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=fixture','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         env=dict(os.environ,SSL_CERT_FILE=str(cert))
         for scheme,default,other in (('http','80','8080'),('https','443','8443')):
@@ -543,12 +543,88 @@ def raw_chunks():
             assert bool(published_roots(w))==(kind=='valid'),kind
     print('real chunked framing rejects NUL-hidden ordinary/terminal extensions and digits PASS')
 
+
+def json_contract():
+    diagnostic=b'geranium image: invalid or excessive JSON\n'
+    with tempfile.TemporaryDirectory() as w, Registry() as r:
+        original=r.manifest
+        config=encode(r.config)
+        serial=0
+        def check(label,body,source='manifest',expected=None):
+            nonlocal serial
+            serial+=1
+            r.auth=source=='token'
+            r.manifest=original
+            if source=='manifest': r.manifest=body
+            elif source=='config':
+                r.blobs[digest(body)]=body
+                m=json.loads(original);m['config']=descriptor(body,OCI+'config.v1+json');r.manifest=encode(m)
+            else: r.token_body=body
+            root=pathlib.Path(w)/str(serial)
+            p=call('pull','--root',root,'--http-loopback',r.ref,ok=expected is None)
+            if expected is not None:
+                assert p.returncode==1 and expected in p.stderr,(label,p.returncode,p.stderr)
+                assert not published_roots(root),label
+            else:
+                assert len(published_roots(root))==1,label
+                call('create','--root',root,'--image',r.ref,'json')
+                call('rm','--root',root,'json')
+            print('JSON',source,label,'PASS',flush=True)
+        def extra(base,value): return base[:-1]+b',"ignored":'+value+b'}'
+        # Ignored metadata still receives whole-document validation.
+        for label,value in (
+            ('raw UTF8','"Zażółć 🙂"'.encode()),
+            ('surrogate pair',b'"\\ud83d\\ude42"'),
+            ('escaped controls',b'"\\b\\f\\n\\r\\t"'),
+            ('depth32',b'['*31+b'0'+b']'*31),
+            ('number64',b'1'*64),
+        ): check(label,extra(config,value),'config')
+        for label,value in (
+            ('escaped duplicate key',b'{"a":1,"\\u0061":2}'),
+            ('nested duplicate key',b'[{"x":{"same":0,"same":1}}]'),
+            ('raw/escaped Unicode duplicate',b'{"'+ '🙂'.encode()+b'":0,"\\ud83d\\ude42":1}'),
+            ('NUL key',b'{"bad\\u0000key":0}'),
+            ('NUL value',b'"bad\\u0000value"'),
+            ('invalid UTF8',b'"\xc0\xaf"'),
+            ('unpaired surrogate',b'"\\ud800"'),
+            ('bad escape',b'"\\x20"'),
+            ('depth33',b'['*32+b'0'+b']'*32),
+            ('number65',b'1'*65),
+            ('leading zero',b'01'),
+            ('nonfinite',b'NaN'),
+            ('trailing comma',b'[0,]'),
+            ('comment',b'/* no */0'),
+        ): check(label,extra(config,value),'config',diagnostic)
+        for label,suffix in (('trailing garbage',b'x'),('multiple roots',b' {}'),('raw NUL',b'\0')):
+            check(label,original+suffix,expected=diagnostic)
+        for number in (b'-0',b'2.0',b'2e0',b'18446744073709551616'):
+            check('schema '+number.decode(),original.replace(b'"schemaVersion":2',b'"schemaVersion":'+number),expected=diagnostic)
+        m=json.loads(original)
+        for number,expected in ((b'18446744073709551615',b'unsupported config descriptor'),(b'18446744073709551616',diagnostic)):
+            m['config']['size']='NUMBER'
+            check('descriptor '+number.decode(),encode(m).replace(b'"NUMBER"',number),expected=expected)
+        def nodes(value):
+            return 1+sum(map(nodes,value.values() if isinstance(value,dict) else value if isinstance(value,list) else []))
+        # Adding a metadata array contributes one array and N null values.
+        count=32768-nodes(json.loads(original))-1
+        check('values32768',extra(original,b'['+b','.join([b'null']*count)+b']'))
+        check('values32769',extra(original,b'['+b','.join([b'null']*(count+1))+b']'),expected=diagnostic)
+        check('input1MiB',original+b' '*(1024*1024-len(original)))
+        check('input1MiB+1',original+b' '*(1024*1024+1-len(original)),expected=b'response too large')
+        check('access_token fallback',b'{"access_token":"fixture-token","ignored":"\\ud83d\\ude42"}','token')
+        for label,body in (
+            ('escaped duplicate token',b'{"token":"fixture-token","\\u0074oken":"fixture-token"}'),
+            ('NUL token',b'{"token":"fixture-token\\u0000"}'),
+            ('nested duplicate token metadata',b'{"token":"fixture-token","other":{"x":0,"x":1}}'),
+        ): check(label,body,'token',diagnostic)
+    print('real registry manifest/config/token JSON contract PASS')
+
 # Single common selector list, consumed by images.sh in native/musl/CI gates.
 # image-selectors.py checks every no-argument behavior against this registration.
 CASES=('cli','pull','remove','create','hardlinks','transport','plain_bounds',
        'layers','lower_directories','reject_layers','integrity','partial',
        'lifecycle','path_search','opaque','raw_transport','slow_transport',
-       'optional_metadata','long_metadata','authority','default_host','raw_chunks')
+       'optional_metadata','long_metadata','authority','default_host','raw_chunks','json_contract')
 if __name__=='__main__':
     if sys.argv[1]=='--list':
         print('\n'.join(CASES))

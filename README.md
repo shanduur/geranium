@@ -4,8 +4,20 @@ Geranium is Unlicensed C software for persistent Linux containers from an unpack
 rootfs or a registry image. It delivers nine independent executables: gu-pull,
 gu-rmi, gu-create, gu-start, gu-run, gu-stop,
 gu-inspect, gu-logs, and gu-rm. Build dependencies are a C99
-compiler, a shared-library linker, OpenSSL development libraries (libssl/libcrypto), and zlib. Runtime TLS
-uses the system CA trust store; OpenSSL also supplies SHA256.
+compiler, a shared-library linker, OpenSSL development libraries (libssl/libcrypto),
+zlib, yyjson (tested with 0.12.0), and skalibs development headers/libraries
+(tested with 2.14.4.0). On Alpine 3.23 install
+`openssl-dev zlib-dev yyjson-dev skalibs-dev`. Configure probes these
+external dependencies by compiling and linking; it does not download them.
+Runtime TLS uses the system CA trust store; OpenSSL also supplies SHA256.
+
+Commands report short status messages on stderr. Pulls show manifest/config
+lookup and numbered layer download, verification, and extraction phases; cached
+pulls report `already present`. There are no percentages, terminal controls, or
+background logging processes. Startup status means the workload acknowledged
+exec, not that it has completed successfully; foreground commands still return
+the workload exit code. `inspect` and `logs` keep their existing stdout without
+status chatter.
 
 ```sh
 CFLAGS='-O2 -Wall -Wextra -Werror -pedantic' sh configure
@@ -68,7 +80,11 @@ Limits: 128 layers; 64 MiB compressed bytes per layer; 1 GiB total uncompressed
 tar bytes; 256 MiB per regular tar member; 100,000 entries per layer; depth 32;
 16 MiB layer-path and copy-hardlink metadata limits;
 1 MiB each for manifest/config/token JSON; 32 KiB HTTP headers; 32 JSON nesting
-levels; 32,768 JSON values; five request attempts through redirects. HTTP framing
+levels (root at depth zero); 32,768 JSON values, excluding object keys;
+64 bytes per number token; five request attempts through redirects. JSON is
+strictly decoded by external yyjson, with valid UTF-8, no embedded NUL in
+strings/keys, and no duplicate decoded object keys at any depth. Unsigned image
+integers require decimal digits only, with exact overflow checks. HTTP framing
 requires Content-Length or chunked transfer; ambiguous framing, chunk extensions,
 trailers, and truncated responses fail. Connection, TLS and headers share a
 30-second monotonic deadline. Bodies allow five minutes of total elapsed time
@@ -155,7 +171,7 @@ GERANIUM_BACKEND=unsupported builds portable storage/CLI support and rejects
 execution before launching lifecycle processes. This does not provide native
 execution on BSD, Darwin, or illumos, or Linux-image compatibility there.
 
-`make test` runs 35 selected shell gates, including all 22 registered common
+`make test` runs 37 selected shell gates, including all 23 registered common
 image cases and the separate image-copy/removal race gate. A selector-completeness
 check rejects unregistered image cases. The library gate verifies the actual
 ELF linkage/API, an installed C consumer, moved installation loading, libc fault
@@ -210,7 +226,7 @@ The full namespace/ptrace fault suite is Linux-only. It needs Python 3 and the
 OpenSSL command for controlled registry,
 TLS, and race fixtures. `sh tests/public-image.sh` separately verifies Docker Hub
 HTTPS acquisition and a complete image-backed lifecycle. The musl script runs this
-public gate as root and runner, in addition to the same 35 selected shell gates.
+public gate as root and runner, in addition to the same 37 selected shell gates.
 Its root gate requires the real port-443 wire test; its runner gate exercises
 rootless lower-directory updates.
 Runtime programs have no Python dependency. Command lock anchors are retained as

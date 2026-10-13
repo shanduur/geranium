@@ -525,13 +525,14 @@ char *registry_token(const char *challenge, int local)
 	struct response r = registry_get(url, NULL, local, 1024 * 1024);
 	if (r.status != 200)
 		fail("anonymous token request failed");
-	struct json *j = json_parse(r.data, r.size), *t = json_get(j, "token");
+	yyjson_doc *doc = json_parse(r.data, r.size);
+	yyjson_val *j = yyjson_doc_get_root(doc), *t = json_get(j, "token");
 	if (!t)
 		t = json_get(j, "access_token");
 	char *token = strdup(json_string(t));
 	if (!token || !*token || strlen(token) > 8192)
 		fail("invalid token");
-	json_free(j);
+	yyjson_doc_free(doc);
 	free(r.data);
 	return token;
 }

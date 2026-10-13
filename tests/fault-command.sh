@@ -7,5 +7,5 @@ output=$1; verb=$2; fixture=$3; shift 3
 name=$(basename "$output")
 libdir=$(dirname "$output")/.lib-"$name"
 mkdir -p "$libdir"
-"${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -fPIC -std=c99 "$fixture" geranium.o image.o registry.o json.o layer.o backend.o ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map "$@" ${LDLIBS:-} -lssl -lcrypto -lz -o "$libdir/libgeranium.so"
+"${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -fPIC -std=c99 "$fixture" geranium.o image.o registry.o json.o layer.o backend.o ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map "$@" ${LDLIBS:-} -lssl -lcrypto -lz -lyyjson -lskarnet -o "$libdir/libgeranium.so"
 "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 "src/$verb.c" ${LDFLAGS:-} "-L$libdir" -Wl,-rpath,'$ORIGIN'"/.lib-$name" -lgeranium ${LDLIBS:-} -o "$output"
