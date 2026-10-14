@@ -941,7 +941,7 @@ def authority():
         w=pathlib.Path(w);helper=w/'authority';key=w/'server.key';cert=w/'server.pem'
         command=[os.environ.get('CC','cc')]
         for flags in ('CPPFLAGS','CFLAGS'): command+=shlex.split(os.environ.get(flags,'-O2 -Wall -Wextra -Werror -pedantic' if flags=='CFLAGS' else ''))
-        command+=['-std=c99',str(BASE/'tests/registry-authority.c'),str(BASE/'src/json.c')]
+        command+=['-std=c99',str(BASE/'tests/registry-authority.c'),str(BASE/'src/json.c'),str(BASE/'src/fatal.c')]
         for flags in ('LDFLAGS','LDLIBS'): command+=shlex.split(os.environ.get(flags,''))
         subprocess.run(command+['-lssl','-lcrypto','-lyyjson','-o',str(helper)],check=True)
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=fixture','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

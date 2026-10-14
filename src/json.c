@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "json.h"
+#include "fatal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +9,7 @@
 static void error(void)
 {
 	fprintf(stderr, "geranium image: invalid or excessive JSON\n");
-	exit(1);
+	geranium_fatal_exit(1);
 }
 
 static void string_check(yyjson_val *value)

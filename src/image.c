@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "image.h"
+#include "fatal.h"
 #include "registry.h"
 #include "json.h"
 #include "layer.h"
@@ -23,13 +24,13 @@ struct reference {
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium image: %s\n", s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void check(int n, const char *s)
 {
 	if (n < 0) {
 		perror(s);
-		exit(1);
+		geranium_fatal_exit(1);
 	}
 }
 static void hash(const void *p, size_t n, char out[65])
@@ -271,7 +272,7 @@ static struct response fetch(const struct reference *r, const char *kind,
 	if (res.status != 200) {
 		fprintf(stderr, "geranium image: registry HTTP status %d\n",
 			res.status);
-		exit(1);
+		geranium_fatal_exit(1);
 	}
 	return res;
 }
@@ -342,6 +343,7 @@ static void pull_cleanup(void)
 		pull_slots[i].event = pull_slots[i].file = -1;
 	}
 	pull_owner = 0;
+	geranium_fatal_cleanup(NULL);
 	/* SIGCHLD was never changed: even restoring an ignored action can
 	 * discard a caller notification pending while workers were active. */
 	for (unsigned i = 0; i < 2; i++)
@@ -371,6 +373,7 @@ static void pull_begin(void)
 	check(sigprocmask(SIG_BLOCK, &pull_signals, &pull_mask),
 	      "block pull signals");
 	pull_owner = getpid();
+	geranium_fatal_cleanup(pull_cleanup);
 	struct sigaction action;
 	memset(&action, 0, sizeof action);
 	sigemptyset(&action.sa_mask);
@@ -394,7 +397,7 @@ static void pull_cancelled(void)
 		pull_cleanup();
 		/* Preserve a caller's disposition and mask when terminating. */
 		(void)raise(sig);
-		exit(128 + sig);
+		geranium_fatal_exit(128 + sig);
 	}
 }
 static void layer_progress(unsigned index, unsigned count, const char *verb)

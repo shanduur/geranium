@@ -1,4 +1,5 @@
 #include "geranium.h"
+#include "fatal.h"
 #define _POSIX_C_SOURCE 200809L
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,12 +38,12 @@ static void die(const char *s)
 		_exit(125);
 	}
 	perror(s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void bad(const char *s)
 {
 	fprintf(stderr, "geranium: %s\n", s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void must(int v, const char *s)
 {
