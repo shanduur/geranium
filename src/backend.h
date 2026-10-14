@@ -2,6 +2,8 @@
 #define GERANIUM_BACKEND_H
 #include <signal.h>
 int backend_supported(void);
+/* Zero means no crash-safe pull workers; use serial fetching. */
+long backend_pull_cpus(void);
 const char *backend_image_arch(void);
 /* Child calls before setup. Parent returns 1 only after kernel exec event;
  * 0 means child reaped into status; -1 means error (child still owned).

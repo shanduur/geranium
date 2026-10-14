@@ -96,6 +96,38 @@ Removal does not require container-reference accounting because copies share no
 inodes with images. Within each copy, validated image hardlinks remain hardlinks;
 the original rootfs interface still rejects hardlinked sources and sticky modes.
 
+All layer descriptors and their DiffID correspondence are validated before
+fan-out. Linux uses a maximum of four affinity-sized fork workers and per-worker
+EOF pipes polled together, so a later failure cancels earlier blocked requests.
+The parent alone owns metadata, manifest-order extraction and publication;
+workers only download, verify and fill preopened private staging files. Slot
+reservations last through extraction, bounding both active and completed work.
+Worker tokens and buffered strerr state are private after fork. The first child
+operation registers a last-in, first-out atexit guard that calls _exit(1); failure
+to register it calls _exit(1) directly. Startup and helper fatal exits therefore
+cannot run inherited caller atexit/on_exit callbacks or delay completion EOF. Worker descriptors
+exclude the image lock, rootfs and unrelated caller descriptors. The backend
+registers Linux parent-death SIGKILL before worker I/O, checking the parent PID
+again to close the registration race. Other backends use serial pulls rather
+than leaving orphanable helpers. See README for buffer limits and crash limits.
+
+The process-lifetime coordinator temporarily installs SIGINT/SIGTERM handlers
+unless the caller ignores those signals; workers also retain ignored actions.
+Caller-blocked SIGINT/SIGTERM remain blocked in parent and workers, with queued
+signals preserved until the caller chooses to unblock them.
+SIGCHLD keeps its inherited disposition and stays blocked until every owned worker
+is reaped, then the caller's mask is restored. Pending notifications and unrelated
+child exits during acquisition reach the caller's handler after restoration.
+Callers using SIG_IGN or SA_NOCLDWAIT for SIGCHLD acquire layers serially, preserving
+auto-reaping without risking recycled worker PIDs. Other caller actions and masks
+are restored when done. Cancellation signals kill owned workers immediately; parent cleanup reaps each recorded PID
+before releasing the lock. An atexit cleanup also covers fatal exits from existing
+extraction and allocation/filesystem helpers. Reaping blocks cancellation signals
+to prevent PID-reuse races. Caller-owned children are never waited on. SIGKILL
+cannot run parent cleanup: the kernel terminates workers, system init must reap
+orphan zombies, and the next lock holder recovers the unpublished stage. Current
+synchronous extraction may delay parent signal exit until its step returns.
+
 Caller-side status messages use external skalibs `strerr` (`-lskarnet`) for
 plain newline-terminated stderr output. The API flushes each message and
 preserves errno; it is synchronous and not thread-safe, matching the existing
@@ -104,7 +136,8 @@ without new delays or state reads. Pull completion follows atomic publication
 or validated cache reuse. Messages contain fixed text and bounded layer counts,
 not credentials, tokens, references, or server response bodies. The bounded PID1
 fatal path and raw-byte container output capture remain unchanged. No public
-API, callback, logging configuration, or helper process is added.
+API, callback, or logging configuration is added. Linux pulls own bounded
+short-lived fetch workers; none survives the pull as an executing helper.
 
 Registry transport is original POSIX socket code using system OpenSSL for verified
 TLS and SHA256, zlib for gzip, and external yyjson for JSON decoding. No TLS

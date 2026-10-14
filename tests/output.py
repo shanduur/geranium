@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from images import Registry, OCI, tar, call
 
 BASE = pathlib.Path(__file__).resolve().parent.parent
@@ -22,11 +23,17 @@ def lines(p):
 def pull_progress():
     with tempfile.TemporaryDirectory() as w, Registry(layers=[tar([('first', b'a')]), tar([('second', b'b')])]) as r:
         p = call('pull', '--root', w, '--http-loopback', r.ref)
-        assert lines(p) == [
-            'geranium: fetching manifest', 'geranium: fetching config',
-            'geranium: layer 1/2 downloading', 'geranium: layer 1/2 verifying', 'geranium: layer 1/2 extracting',
-            'geranium: layer 2/2 downloading', 'geranium: layer 2/2 verifying', 'geranium: layer 2/2 extracting',
-            'geranium: pulled'], p.stderr
+        progress = lines(p)
+        assert progress[:2] == ['geranium: fetching manifest', 'geranium: fetching config'], p.stderr
+        assert progress[-1] == 'geranium: pulled', p.stderr
+        expected = [f'geranium: layer {i}/2 {phase}' for i in (1, 2)
+                    for phase in ('downloading', 'verifying', 'extracting')]
+        assert sorted(progress[2:-1]) == sorted(expected), p.stderr
+        for i in (1, 2):
+            positions = [progress.index(f'geranium: layer {i}/2 {phase}')
+                         for phase in ('downloading', 'verifying', 'extracting')]
+            assert positions == sorted(positions), p.stderr
+        assert progress.index('geranium: layer 1/2 extracting') < progress.index('geranium: layer 2/2 extracting'), p.stderr
         assert len(list(pathlib.Path(w).glob('.images/*/rootfs'))) == 1
         assert lines(call('pull', '--root', w, '--http-loopback', r.ref)) == ['geranium: already present']
         assert lines(call('rmi', '--root', w, r.ref)) == ['geranium: removed image']
@@ -35,6 +42,24 @@ def pull_progress():
         assert b'pulled' not in bad.stderr and b'already present' not in bad.stderr, bad.stderr
         assert not [p for p in pathlib.Path(w).glob('.images/*/rootfs') if not p.parent.name.startswith('.')]
     print('output pull fresh/cache/rejected PASS')
+
+
+def bounded_line(stream, timeout):
+    deadline = time.monotonic() + timeout
+    line = bytearray()
+    fd = stream.fileno()
+    blocking = os.get_blocking(fd)
+    os.set_blocking(fd, False)
+    try:
+        while not line.endswith(b'\n'):
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([fd], [], [], remaining)[0], 'complete status line timed out'
+            byte = os.read(fd, 1)
+            assert byte and len(line) < 160, 'missing/oversized status line'
+            line += byte
+        return bytes(line)
+    finally:
+        os.set_blocking(fd, blocking)
 
 
 def pull_live():
@@ -52,8 +77,7 @@ def pull_live():
         try:
             assert p.stderr is not None
             assert entered.wait(8), 'manifest request not received'
-            assert select.select([p.stderr], [], [], 2)[0], 'no progress while response held'
-            assert p.stderr.readline() == b'geranium: fetching manifest\n'
+            assert bounded_line(p.stderr, 2) == b'geranium: fetching manifest\n'
             assert p.poll() is None, 'pull completed despite held response'
             release.set()
             stdout, stderr = p.communicate(timeout=8)
@@ -99,8 +123,7 @@ def runtime():
         p = subprocess.Popen([str(BASE/'gu-start'), '--root', str(root), 'demo'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             assert p.stderr is not None and p.stdout is not None
-            assert select.select([p.stderr], [], [], 8)[0], 'foreground status deferred until workload exit'
-            assert p.stderr.readline() == b'geranium: started\n'
+            assert bounded_line(p.stderr, 8) == b'geranium: started\n'
             assert p.poll() is None and not select.select([p.stdout], [], [], 0)[0]
             os.write(gatefd, b'release\n')
             stdout, stderr = p.communicate(timeout=8)

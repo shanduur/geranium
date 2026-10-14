@@ -96,6 +96,30 @@ redirects cannot downgrade HTTPS, and cross-origin redirects drop Authorization.
 Only anonymous Bearer challenges are supported. `--http-loopback` explicitly enables
 HTTP fixtures with literal `127.0.0.1`; it is never an automatic fallback.
 
+Linux layer downloads and compressed digest checks use up to four owned fork
+workers, automatically limited by the caller's CPU affinity (online CPU count
+with a one-CPU fallback) and layer count. Completed layers keep their slots until
+the parent extracts them in manifest order. Each worker reserves at most 64 MiB + 1 byte for a layer response, plus
+1 MiB + 1 byte during auth refresh: at most 260 MiB + 8 bytes of worker response
+buffers. Compressed staging files total at most 256 MiB; the parent maps one
+file of at most 64 MiB. Parent manifest/config response buffers add 2 MiB + 2
+bytes during fan-out. These are not total staging or RSS bounds: extraction
+also stages an expanded tar under the existing 1 GiB expansion limit and
+allocates separately, as do TLS, JSON, inherited metadata, and filesystem cache. There is no CLI setting. Workers refresh private auth state,
+never extract or publish, and are cancelled and reaped before a failed or
+interrupted pull releases its image lock. SIGKILL or a parent crash triggers
+Linux's parent-death SIGKILL guard; orphan zombies then need the system reaper.
+Backends without this worker lifetime guarantee retain the serial fetch path;
+existing image platform validation still applies. Caller SIGCHLD actions stay
+unchanged and notifications remain blocked until owned workers are reaped and the
+caller mask is restored. SIG_IGN or SA_NOCLDWAIT callers use serial acquisition to
+preserve auto-reaping. Worker fatal exits bypass inherited caller exit callbacks.
+SIGINT/SIGTERM interrupt active workers unless ignored by the caller; ignored
+actions remain effective in the parent and workers throughout acquisition.
+Extraction finishes its current synchronous step before the parent handles
+cancellation. An
+interrupted unpublished stage is recovered by the next pull.
+
 Images live under the private state's `.images/`, with retained `.lock-HASH`
 fcntl anchors independent of container name locks. Pull stages `.pending-HASH`
 and atomically renames a validated image into place. Removal unpublishes it to

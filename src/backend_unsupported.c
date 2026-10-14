@@ -1,5 +1,10 @@
 #include "backend.h"
 #include <errno.h>
+long backend_pull_cpus(void)
+{
+	/* Without a kernel parent-death contract, never orphan fetch helpers. */
+	return 0;
+}
 int backend_supported(void)
 {
 	return 0;

@@ -129,7 +129,7 @@ esac
     printf '%s\n' 'check-format:'
     printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c'
     printf '%s\n' 'test: all'
-    for script in dependencies json output library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race; do
+    for script in dependencies json output library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race pull-workers; do
         printf '\tMAKE="$(MAKE)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LDLIBS="$(LDLIBS)" sh tests/%s.sh\n' "$script"
     done
     printf '%s\n' 'install: all'

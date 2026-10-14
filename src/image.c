@@ -5,6 +5,10 @@
 #include "layer.h"
 #include "backend.h"
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <poll.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -282,6 +286,302 @@ static void verify(struct response *res, const char *digest,
 	if (*res->digest && strcmp(res->digest, got))
 		fail("registry digest header mismatch");
 }
+/* Slots are reserved until ordered extraction, including completed workers.
+ * Four workers each own at most LAYER_LIMIT+1 response bytes and, during auth
+ * refresh, an additional 1 MiB+1 token response. Four LAYER_LIMIT-sized files
+ * bound compressed staging; the parent maps one. Extraction's layer.tar,
+ * rootfs, TLS, JSON, inherited metadata and page cache are separate limits,
+ * so this is not a bound on total staging or RSS. */
+#define PULL_SLOTS 4
+#define LAYER_LIMIT (64 * 1024 * 1024)
+struct pull_layer {
+	const char *digest, *diff;
+	size_t size;
+	int gzip;
+};
+struct pull_slot {
+	volatile sig_atomic_t pid;
+	int event, file, done;
+};
+static struct pull_slot pull_slots[PULL_SLOTS];
+static pid_t pull_owner;
+static volatile sig_atomic_t pull_cancel;
+static sigset_t pull_signals, pull_mask;
+static const int pull_signums[] = { SIGINT, SIGTERM, SIGCHLD };
+static struct sigaction pull_actions[3];
+
+static void pull_interrupt(int sig)
+{
+	int saved_errno = errno;
+	pull_cancel = sig;
+	/* PIDs cannot be recycled until reaped; reaping blocks these signals. */
+	for (unsigned i = 0; i < PULL_SLOTS; i++)
+		if (pull_slots[i].pid > 0)
+			(void)kill((pid_t)pull_slots[i].pid, SIGKILL);
+	errno = saved_errno;
+}
+static void pull_cleanup(void)
+{
+	if (!pull_owner || pull_owner != getpid())
+		return;
+	(void)sigprocmask(SIG_BLOCK, &pull_signals, NULL);
+	for (unsigned i = 0; i < PULL_SLOTS; i++)
+		if (pull_slots[i].pid > 0)
+			(void)kill((pid_t)pull_slots[i].pid, SIGKILL);
+	for (unsigned i = 0; i < PULL_SLOTS; i++) {
+		if (pull_slots[i].pid > 0) {
+			while (waitpid((pid_t)pull_slots[i].pid, NULL, 0) < 0 &&
+			       errno == EINTR)
+				;
+			pull_slots[i].pid = 0;
+		}
+		if (pull_slots[i].event >= 0)
+			close(pull_slots[i].event);
+		if (pull_slots[i].file >= 0)
+			close(pull_slots[i].file);
+		pull_slots[i].event = pull_slots[i].file = -1;
+	}
+	pull_owner = 0;
+	/* SIGCHLD was never changed: even restoring an ignored action can
+	 * discard a caller notification pending while workers were active. */
+	for (unsigned i = 0; i < 2; i++)
+		(void)sigaction(pull_signums[i], &pull_actions[i], NULL);
+	(void)sigprocmask(SIG_SETMASK, &pull_mask, NULL);
+}
+static void pull_begin(void)
+{
+	static int registered;
+	if (!registered) {
+		if (atexit(pull_cleanup))
+			fail("register pull cleanup");
+		registered = 1;
+	}
+	pull_cancel = 0;
+	for (unsigned i = 0; i < PULL_SLOTS; i++) {
+		pull_slots[i].pid = 0;
+		pull_slots[i].event = pull_slots[i].file = -1;
+		pull_slots[i].done = 0;
+	}
+	sigemptyset(&pull_signals);
+	for (unsigned i = 0; i < 3; i++) {
+		sigaddset(&pull_signals, pull_signums[i]);
+		check(sigaction(pull_signums[i], NULL, &pull_actions[i]),
+		      "read pull signal action");
+	}
+	check(sigprocmask(SIG_BLOCK, &pull_signals, &pull_mask),
+	      "block pull signals");
+	pull_owner = getpid();
+	struct sigaction action;
+	memset(&action, 0, sizeof action);
+	sigemptyset(&action.sa_mask);
+	action.sa_handler = pull_interrupt;
+	if (pull_actions[0].sa_handler != SIG_IGN)
+		check(sigaction(SIGINT, &action, NULL),
+		      "pull interrupt action");
+	if (pull_actions[1].sa_handler != SIG_IGN)
+		check(sigaction(SIGTERM, &action, NULL),
+		      "pull termination action");
+	/* Retain pending caller notifications and prevent caller handlers from
+	 * reaping owned workers. EOF pipes, not SIGCHLD, drive completion. */
+	sigset_t running = pull_mask;
+	sigaddset(&running, SIGCHLD);
+	check(sigprocmask(SIG_SETMASK, &running, NULL), "unblock pull signals");
+}
+static void pull_cancelled(void)
+{
+	if (pull_cancel) {
+		int sig = pull_cancel;
+		pull_cleanup();
+		/* Preserve a caller's disposition and mask when terminating. */
+		(void)raise(sig);
+		exit(128 + sig);
+	}
+}
+static void layer_progress(unsigned index, unsigned count, const char *verb)
+{
+	char position[16];
+	(void)snprintf(position, sizeof position, "%u/%u", index + 1, count);
+	strerr_warnn(4, "geranium: layer ", position, " ", verb);
+}
+/* Last registered, first invoked: fatal helpers must not run inherited
+ * caller atexit/on_exit callbacks or keep the completion pipe open. */
+static void pull_worker_exit(void)
+{
+	_exit(1);
+}
+static void pull_spawn(struct pull_slot *slot, unsigned index, unsigned count,
+		       int stage, const struct reference *r,
+		       const struct pull_layer *layer, int local, char *token)
+{
+	pull_cancelled();
+	char name[32];
+	(void)snprintf(name, sizeof name, ".layer-%u", index);
+	slot->file = openat(stage, name,
+			    O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+			    0600);
+	check(slot->file, "stage layer file");
+	int events[2];
+	check(pipe(events), "layer event pipe");
+	slot->event = events[0];
+	layer_progress(index, count, "downloading");
+	sigset_t previous;
+	check(sigprocmask(SIG_BLOCK, &pull_signals, &previous),
+	      "block worker signals");
+	pid_t pid = fork();
+	check((int)pid, "fork layer worker");
+	if (!pid) {
+		if (atexit(pull_worker_exit))
+			_exit(1);
+		/* Close the parent-death registration race before doing any I/O. */
+		check(backend_watch_parent((int)pull_owner),
+		      "watch pull parent");
+		pull_owner = 0;
+		struct sigaction action;
+		memset(&action, 0, sizeof action);
+		sigemptyset(&action.sa_mask);
+		for (unsigned i = 0; i < 3; i++) {
+			action.sa_handler = SIG_DFL;
+			if (pull_actions[i].sa_handler == SIG_IGN)
+				action.sa_handler = SIG_IGN;
+			check(sigaction(pull_signums[i], &action, NULL),
+			      "worker signal action");
+		}
+		int keep[] = { slot->file, events[1] };
+		check(backend_close_inherited(keep, 2),
+		      "close worker descriptors");
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		check(sigprocmask(SIG_SETMASK, &previous, NULL),
+		      "worker signal mask");
+		struct response blob = fetch(r, "blobs", layer->digest, local,
+					     &token, LAYER_LIMIT);
+		layer_progress(index, count, "verifying");
+		verify(&blob, layer->digest, layer->size);
+		write_all(slot->file, blob.data, blob.size);
+		check(fsync(slot->file), "sync downloaded layer");
+		free(blob.data);
+		/* Pipe EOF is the completion event, including fatal helper exits. */
+		_exit(0);
+	}
+	slot->pid = pid;
+	slot->done = 0;
+	close(events[1]);
+	check(sigprocmask(SIG_SETMASK, &previous, NULL),
+	      "restore worker signals");
+}
+static void pull_events(unsigned slots, int wait)
+{
+	struct pollfd events[PULL_SLOTS];
+	for (unsigned i = 0; i < slots; i++) {
+		events[i].fd = pull_slots[i].event;
+		events[i].events = POLLIN;
+		events[i].revents = 0;
+	}
+	pull_cancelled();
+	int n = poll(events, slots, wait ? -1 : 0);
+	if (n < 0 && errno == EINTR) {
+		pull_cancelled();
+		return;
+	}
+	check(n, "poll layer workers");
+	for (unsigned i = 0; i < slots; i++) {
+		if (!events[i].revents)
+			continue;
+		struct pull_slot *slot = &pull_slots[i];
+		sigset_t previous;
+		check(sigprocmask(SIG_BLOCK, &pull_signals, &previous),
+		      "block reap signals");
+		int status;
+		pid_t pid;
+		do {
+			pid = waitpid((pid_t)slot->pid, &status, 0);
+		} while (pid < 0 && errno == EINTR);
+		check((int)pid, "reap layer worker");
+		slot->pid = 0;
+		close(slot->event);
+		slot->event = -1;
+		slot->done = 1;
+		check(sigprocmask(SIG_SETMASK, &previous, NULL),
+		      "restore reap signals");
+		pull_cancelled();
+		if (!WIFEXITED(status) || WEXITSTATUS(status))
+			fail("layer worker failed");
+	}
+}
+static void pull_layers(int root, int stage, const struct reference *r,
+			struct pull_layer *layers, unsigned count, int local,
+			char **token)
+{
+	unsigned long long expanded = 0;
+	long cpus = backend_pull_cpus();
+	struct sigaction children;
+	check(sigaction(SIGCHLD, NULL, &children), "read pull child action");
+	/* Auto-reaping cannot safely coexist with owned waitpid/PID lifetimes.
+	 * Serial acquisition preserves the caller's action and notifications. */
+	if (children.sa_handler == SIG_IGN ||
+	    (children.sa_flags & SA_NOCLDWAIT))
+		cpus = 0;
+	if (!cpus) {
+		/* Portable storage still works without unsafe orphanable workers. */
+		for (unsigned i = 0; i < count; i++) {
+			layer_progress(i, count, "downloading");
+			struct response blob = fetch(r, "blobs",
+						     layers[i].digest, local,
+						     token, LAYER_LIMIT);
+			layer_progress(i, count, "verifying");
+			verify(&blob, layers[i].digest, layers[i].size);
+			layer_progress(i, count, "extracting");
+			layer_apply(root, stage, blob.data, blob.size,
+				    layers[i].gzip, layers[i].diff, &expanded);
+			free(blob.data);
+		}
+		return;
+	}
+	unsigned slots = cpus > PULL_SLOTS ? PULL_SLOTS : (unsigned)cpus;
+	if (slots > count)
+		slots = count;
+	if (!slots)
+		return;
+	pull_begin();
+	for (unsigned i = 0; i < slots; i++) {
+		pull_events(slots, 0);
+		pull_spawn(&pull_slots[i], i, count, stage, r, &layers[i],
+			   local, *token);
+	}
+	for (unsigned i = 0; i < count; i++) {
+		struct pull_slot *slot = &pull_slots[i % slots];
+		/* Observe every completion, never just the next manifest-order PID. */
+		pull_events(slots, 0);
+		while (!slot->done)
+			pull_events(slots, 1);
+		struct stat st;
+		check(fstat(slot->file, &st), "downloaded layer stat");
+		if (!S_ISREG(st.st_mode) || st.st_size < 1 ||
+		    (unsigned long long)st.st_size != layers[i].size ||
+		    st.st_uid != geteuid() || st.st_nlink != 1)
+			fail("invalid downloaded layer file");
+		void *data = mmap(NULL, layers[i].size, PROT_READ, MAP_PRIVATE,
+				  slot->file, 0);
+		if (data == MAP_FAILED)
+			check(-1, "map downloaded layer");
+		layer_progress(i, count, "extracting");
+		layer_apply(root, stage, data, layers[i].size, layers[i].gzip,
+			    layers[i].diff, &expanded);
+		check(munmap(data, layers[i].size), "unmap downloaded layer");
+		close(slot->file);
+		slot->file = -1;
+		char name[32];
+		(void)snprintf(name, sizeof name, ".layer-%u", i);
+		check(unlinkat(stage, name, 0), "remove downloaded layer");
+		pull_events(slots, 0);
+		if (i + slots < count)
+			pull_spawn(slot, i + slots, count, stage, r,
+				   &layers[i + slots], local, *token);
+	}
+	pull_cancelled();
+	pull_cleanup();
+	pull_cancelled();
+}
 static int media(const char *s, const char *oci, const char *docker)
 {
 	return !strcmp(s, oci) || !strcmp(s, docker);
@@ -520,7 +820,7 @@ int image_pull(int state, const char *input, int local_http)
 		fail("invalid image layers");
 	yyjson_arr_iter diff_iter = yyjson_arr_iter_with(diffs);
 	unsigned count = 0;
-	unsigned long long expanded = 0;
+	struct pull_layer validated[128];
 	size_t index, length;
 	yyjson_val *layer;
 	yyjson_arr_foreach(layers, index, length, layer)
@@ -541,23 +841,16 @@ int image_pull(int state, const char *input, int local_http)
 		if (!digest_ok(dg) || sz > 64 * 1024 * 1024 ||
 		    !digest_ok(json_string(diff)))
 			fail("unsupported or excessive layer descriptor");
-		char position[16];
-		(void)snprintf(position, sizeof position, "%u/%u", count,
-			       (unsigned)length);
-		strerr_warnn(4, "geranium: layer ", position, " ",
-			     "downloading");
-		struct response blob = fetch(&r, "blobs", dg, local_http,
-					     &token, 64 * 1024 * 1024);
-		strerr_warnn(4, "geranium: layer ", position, " ", "verifying");
-		verify(&blob, dg, sz);
-		strerr_warnn(4, "geranium: layer ", position, " ",
-			     "extracting");
-		layer_apply(root, stage, blob.data, blob.size, gzip,
-			    json_string(diff), &expanded);
-		free(blob.data);
+		validated[count - 1] = (struct pull_layer){
+			.digest = dg,
+			.diff = json_string(diff),
+			.size = (size_t)sz,
+			.gzip = gzip,
+		};
 	}
 	if (yyjson_arr_iter_has_next(&diff_iter))
 		fail("DiffID count mismatch");
+	pull_layers(root, stage, &r, validated, count, local_http, &token);
 	check(fchmod(root, (mode_t)layer_root_mode()),
 	      "image root permissions");
 	close(root);
