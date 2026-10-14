@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "layer.h"
+#include "fatal.h"
 #include <sys/stat.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -14,13 +15,13 @@
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium layer: %s\n", s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void check(int n, const char *s)
 {
 	if (n < 0) {
 		perror(s);
-		exit(1);
+		geranium_fatal_exit(1);
 	}
 }
 static int directory(int fd, const char *s)

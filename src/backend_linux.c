@@ -180,6 +180,17 @@ int backend_close_inherited(const int *keep, unsigned count)
 	}
 	return closedir(dir);
 }
+long backend_pull_cpus(void)
+{
+	cpu_set_t cpus;
+	if (sched_getaffinity(0, sizeof cpus, &cpus) == 0) {
+		long count = CPU_COUNT(&cpus);
+		if (count > 0)
+			return count;
+	}
+	long count = sysconf(_SC_NPROCESSORS_ONLN);
+	return count > 0 ? count : 1;
+}
 int backend_supported(void)
 {
 	int handle = backend_pidfd_open((int)getpid());

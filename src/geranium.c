@@ -1,4 +1,5 @@
 #include "geranium.h"
+#include "fatal.h"
 #define _POSIX_C_SOURCE 200809L
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,12 +38,12 @@ static void die(const char *s)
 		_exit(125);
 	}
 	perror(s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void bad(const char *s)
 {
 	fprintf(stderr, "geranium: %s\n", s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static void must(int v, const char *s)
 {
@@ -923,9 +924,39 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	if (read(ack[0], &code, 1) != 1)
 		code = 125;
 	close(ack[0]);
-	close(*lockfd);
-	*lockfd = -1;
 	if (code) {
+		/* A failure reply precedes init's exit. Keep the name and attachment
+		 * fences until that generation releases runtime ownership. */
+		int runtime = runtime_open(container),
+		    pid = runtime_pid(runtime);
+		if (pid) {
+			int handle = backend_pidfd_open(pid);
+			if (handle < 0 && errno != ESRCH)
+				die("open failed startup init");
+			if (handle >= 0 && runtime_pid(runtime) == pid) {
+				struct pollfd done = { .fd = handle,
+						       .events = POLLIN };
+				long long deadline = monotonic_ms() + 12000;
+				for (;;) {
+					long long left =
+						deadline - monotonic_ms();
+					if (left <= 0)
+						bad("startup failure cleanup timed out");
+					int n = poll(&done, 1, (int)left);
+					if (n < 0 && errno == EINTR)
+						continue;
+					must(n, "wait failed startup init");
+					if (!n)
+						bad("startup failure cleanup timed out");
+					break;
+				}
+			}
+			if (handle >= 0)
+				close(handle);
+		}
+		close(runtime);
+		close(*lockfd);
+		*lockfd = -1;
 		fprintf(stderr, "geranium: startup failed with status %u\n",
 			(unsigned)code);
 		int diagnostic = file(container, "log", O_RDONLY, 0);
@@ -941,6 +972,8 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 			close(owner[1]);
 		return code;
 	}
+	close(*lockfd);
+	*lockfd = -1;
 	if (detached) {
 		close(attachment);
 		strerr_warnn(2, "geranium: ", "started (detached)");

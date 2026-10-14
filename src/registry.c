@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "registry.h"
+#include "fatal.h"
 #include "json.h"
 #include <sys/socket.h>
 #include <netdb.h>
@@ -24,7 +25,7 @@ struct url {
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium registry: %s\n", s);
-	exit(1);
+	geranium_fatal_exit(1);
 }
 static long long now(void)
 {

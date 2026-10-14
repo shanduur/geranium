@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real-binary registry and image behavior gates; runtime has no Python dependency."""
-import ssl, time, os, pathlib, subprocess, tempfile, sys, io, tarfile, gzip, json, hashlib, threading, http.server, contextlib, platform, shlex, stat
+import select, socket, signal, ctypes, ssl, time, os, pathlib, subprocess, tempfile, sys, io, tarfile, gzip, json, hashlib, threading, http.server, contextlib, platform, shlex, stat
 BASE = pathlib.Path(__file__).resolve().parent.parent
 
 def published_roots(root):
@@ -47,7 +47,7 @@ class Registry:
             b=gzip.compress(layer); self.blobs[digest(b)]=b; ds.append(descriptor(b,OCI+'layer.v1.tar+gzip'))
         self.manifest=encode(dict(schemaVersion=2,mediaType=OCI+'manifest.v1+json',config=descriptor(c,OCI+'config.v1+json'),layers=ds))
         self.requests=[]; self.headers=[];self.responses={};self.auth=False;self.tls: tuple[str | pathlib.Path,str | pathlib.Path] | None = None;self.chunked=False;self.truncate=False;self.redirect: str | None = None
-        self.raw_headers: bytes | None = None;self.body_delay=False;self.body_stall=False
+        self.raw_headers: bytes | None = None;self.body_delay=False;self.body_stall=False;self.request_hook=None
         self.chunk_suffix=b'';self.zero_suffix=b''
     def route(self,path,headers):
         if self.signed_host is not None and headers.get('Host')!=self.signed_host:
@@ -70,6 +70,7 @@ class Registry:
             def log_message(self,*a): pass
             def do_GET(self):
                 fixture.requests.append(self.path);fixture.headers.append(dict(self.headers))
+                if fixture.request_hook and not fixture.request_hook(self.path,self.headers,self.connection): return
                 status,headers,body=fixture.route(self.path,self.headers)
                 if fixture.raw_headers is not None and '/manifests/' in self.path:
                     self.connection.sendall(fixture.raw_headers + body)
@@ -112,6 +113,473 @@ def pull():
         assert roots_after==roots and (roots_after[0]/'etc/marker').read_bytes()==b'from registry\n'
         assert len(r.requests)==3, r.requests
     print('controlled real registry pull and network-free cache hit PASS')
+
+
+@contextlib.contextmanager
+def multiworker_binary(binary,cpus=2):
+    if len(os.sched_getaffinity(0)) >= 2:
+        yield binary, None
+        return
+    # Private DSO links the same production PIC objects; only CPU probes change.
+    with tempfile.TemporaryDirectory() as work:
+        private=pathlib.Path(work)/'pull'
+        subprocess.run(['sh',str(pathlib.Path(__file__).parent/'fault-command.sh'),str(private),'pull',
+                        str(pathlib.Path(__file__).parent/'pull-workers.c'),
+                        '-Wl,--wrap=fork','-Wl,--wrap=fsync','-Wl,--wrap=mmap','-Wl,--wrap=openat',
+                        '-Wl,--wrap=sched_getaffinity','-Wl,--wrap=sysconf',
+                        '-Wl,--wrap=backend_watch_parent','-Wl,--wrap=atexit'],cwd=BASE,check=True)
+        print('multi-worker coverage: private linker CPU fixture forces',cpus,'; affinity unchanged',flush=True)
+        yield private, dict(os.environ,GERANIUM_PULL_CPUS=str(cpus))
+
+def parallel_overlap():
+    with multiworker_binary(BASE/'gu-pull') as (binary,env):
+        _parallel_overlap(binary,env)
+
+def _parallel_overlap(binary,env):
+    # Holding request zero is an explicit barrier: request one must start
+    # before zero can complete. No timing-based sleeps establish overlap.
+    first=threading.Event();second=threading.Event();release=threading.Event()
+    with tempfile.TemporaryDirectory() as w:
+        r=Registry([tar([('order',b'first')]),tar([('order',b'second')])])
+        ids=[x['digest'] for x in json.loads(r.manifest)['layers']]
+        route=r.route
+        def controlled(path,headers):
+            if path.endswith(ids[0]):
+                first.set()
+                assert release.wait(10),'first request barrier timed out'
+            if path.endswith(ids[1]): second.set()
+            return route(path,headers)
+        r.route=controlled
+        with r:
+            p=subprocess.Popen([str(binary),'--root',w,'--http-loopback',r.ref],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
+            try:
+                assert first.wait(5),'first layer did not start'
+                assert second.wait(2),'second layer request cannot start while first is held'
+            finally:
+                release.set()
+                out,err=p.communicate(timeout=10)
+            assert p.returncode==0,(out,err)
+            assert out==b''
+            assert (published_roots(w)[0]/'order').read_bytes()==b'second'
+    print('real registry overlapping layer requests and ordered overwrite PASS')
+
+
+class LayerBarriers:
+    """Request gates wake on explicit release or peer disconnect, never sleep."""
+    def __init__(self,r):
+        self.ids=[d['digest'] for d in json.loads(r.manifest)['layers']]
+        self.controls=[socket.socketpair() for _ in self.ids]
+        self.started=[threading.Event() for _ in self.ids]
+        self.closed=[threading.Event() for _ in self.ids]
+        self.returned=[threading.Event() for _ in self.ids]
+        r.request_hook=self.request
+    def request(self,path,headers,connection):
+        identity=path.rsplit('/',1)[-1]
+        if identity not in self.ids: return True
+        i=self.ids.index(identity);self.started[i].set()
+        ready,_,_=select.select([connection,self.controls[i][0]],[],[],15)
+        if connection in ready:
+            assert connection.recv(1)==b'','unexpected client data'
+            self.closed[i].set();return False
+        assert self.controls[i][0] in ready,'request barrier timed out'
+        self.controls[i][0].recv(1);self.returned[i].set();return True
+    def release(self,i): self.controls[i][1].sendall(b'r')
+    def close(self):
+        for a,b in self.controls: a.close();b.close()
+    def release_all(self):
+        for i in range(len(self.ids)): self.release(i)
+
+
+def pull_process(root,r,binary=None,cpus=None,env=None):
+    command=[str(binary or BASE/'gu-pull'),'--root',str(root),'--http-loopback',r.ref]
+    return subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,
+                            preexec_fn=(lambda:os.sched_setaffinity(0,cpus)) if cpus else None)
+
+
+def worker_pidfd(pid):
+    # Python builds may omit os.pidfd_open; Linux x86_64/aarch64 use syscall 434.
+    fd=ctypes.CDLL(None,use_errno=True).syscall(434,pid,0)
+    assert fd>=0,('pidfd_open',pid,ctypes.get_errno())
+    return fd
+
+
+def owned_workers(p):
+    children=pathlib.Path(f'/proc/{p.pid}/task/{p.pid}/children').read_text().split()
+    assert children,'no owned layer workers'
+    return {int(pid):worker_pidfd(int(pid)) for pid in children}
+
+
+def wait_fds(fds,timeout):
+    pending=set(fds);deadline=time.monotonic()+timeout
+    while pending:
+        remaining=deadline-time.monotonic()
+        assert remaining>0,'owned workers did not finish before deadline'
+        ready,_,_=select.select(list(pending),[],[],remaining)
+        assert ready,'owned workers did not finish before deadline'
+        pending.difference_update(ready)
+
+
+def workers_dead(workers,reaped=True):
+    try:
+        wait_fds(workers.values(),3)
+        if reaped:
+            assert all(not pathlib.Path(f'/proc/{pid}').exists() for pid in workers),'worker not reaped'
+    finally:
+        for fd in workers.values():os.close(fd)
+
+
+def window_scenarios(binary,available):
+    for n in sorted({1,min(2,len(available)),min(4,len(available)),len(available)}):
+        yield n,binary,set(available[:n]),None
+    if len(available)==1:
+        # Keep completed-ahead reservations and whole-window bounds covered
+        # at two and four slots, while the real one-CPU case above stays real.
+        for n in (2,4):
+            with multiworker_binary(binary,n) as (private,env):
+                yield n,private,set(available),env
+
+
+def parallel_window():
+    available=sorted(os.sched_getaffinity(0))
+    # Exercise the real single-CPU path and increasing affinity counts.
+    for n,binary,affinity,env in window_scenarios(BASE/'gu-pull',available):
+        slots=min(n,4)
+        with tempfile.TemporaryDirectory() as w:
+            entries=[tar([('.',None,0o750),('dir',None),('dir/old',b'old'),('order',b'zero')])]
+            entries += [tar([('order',str(i).encode()),('dir/new'+str(i),b'new'),('dir/.wh..wh..opq',b'')]) for i in range(1,10)]
+            r=Registry(entries);gates=LayerBarriers(r)
+            with r:
+                p=pull_process(w,r,binary,cpus=affinity,env=env);other=None
+                try:
+                    for i in range(slots): assert gates.started[i].wait(5),(n,i,'initial window')
+                    workers=owned_workers(p)
+                    assert len(workers)==slots,(n,workers)
+                    later=[]
+                    for pid,fd in workers.items():
+                        paths=[os.readlink(x) for x in pathlib.Path(f'/proc/{pid}/fd').iterdir()]
+                        if not any(x.endswith('/.layer-0') for x in paths):later.append(fd)
+                    # Complete the later layers while layer zero stays held.
+                    for i in range(1,slots):
+                        gates.release(i);assert gates.returned[i].wait(3)
+                    wait_fds(later,3)
+                    for fd in workers.values():os.close(fd)
+                    assert not gates.started[slots].wait(.3),'completed slots released before consumption'
+                    stage=next(pathlib.Path(w).glob('.images/.pending-*'))
+                    assert len(list(stage.glob('.layer-*')))==slots
+                    assert not published_roots(w)
+                    # A second pull must stay behind the same image lock.
+                    count=len(r.requests);other=pull_process(w,r)
+                    assert not gates.started[slots].wait(.2)
+                    assert len(r.requests)==count,'same-reference pull bypassed image lock'
+                    gates.release(0)
+                    for i in range(slots,slots+slots):
+                        assert gates.started[i].wait(5),'consumption did not open next window'
+                    assert not gates.started[slots+slots].wait(.3),'window expanded beyond reservation'
+                    assert len(list(stage.glob('.layer-*')))==slots
+                    expected=str(slots-1).encode() if slots>1 else b'zero'
+                    assert (stage/'rootfs/order').read_bytes()==expected
+                    gates.release_all()
+                    out,err=p.communicate(timeout=10);assert p.returncode==0,(n,out,err)
+                    out2,err2=other.communicate(timeout=10);assert other.returncode==0,(out2,err2)
+                    assert b'already present' in err2 and out==out2==b''
+                    assert len(r.requests)==12,r.requests
+                    root=published_roots(w)[0]
+                    assert (root/'order').read_bytes()==b'9'
+                    assert root.stat().st_mode&0o7777==0o750
+                    assert [x.name for x in (root/'dir').iterdir()]==['new9']
+                    assert not list(root.parent.glob('.layer-*'))
+                    before=len(r.requests);call('pull','--root',w,'--http-loopback',r.ref)
+                    assert len(r.requests)==before,'cache hit made network requests'
+                finally:
+                    gates.release_all()
+                    for child in (p,other):
+                        if child and child.poll() is None:child.terminate();child.communicate(timeout=5)
+            gates.close()
+        print('parallel window','fixture CPUs' if env else 'affinity CPUs',n,'actual affinity',sorted(affinity),'slots',slots,'whole window, ordered whiteouts/root mode, lock and cache PASS',flush=True)
+
+
+def parallel_cleanup():
+    with multiworker_binary(BASE/'gu-pull') as (binary,env):
+        _parallel_cleanup(binary,env)
+
+
+def _parallel_cleanup(binary,env):
+    # Become the temporary subreaper for the SIGKILL case so test-owned orphan
+    # zombies are reaped even when the host/container init does not reap them.
+    libc=ctypes.CDLL(None);old=ctypes.c_int()
+    assert libc.prctl(37,ctypes.byref(old),0,0,0)==0
+    assert libc.prctl(36,1,0,0,0)==0
+    try:
+        for kind in ('later-http','later-digest','later-size','diffid','extract','term','int','kill'):
+            with tempfile.TemporaryDirectory() as w:
+                first=tar([('../escape',b'bad')]) if kind=='extract' else tar([('first',b'first')])
+                r=Registry([first,tar([('second',b'second')])]);m=json.loads(r.manifest)
+                ids=[x['digest'] for x in m['layers']]
+                if kind=='later-http': r.responses['/v2/fixture/blobs/'+ids[1]]=(503,{},b'initiating failure')
+                if kind=='later-digest': r.blobs[ids[1]]=b'x'*len(r.blobs[ids[1]])
+                if kind=='later-size': m['layers'][1]['size']+=1;r.manifest=encode(m)
+                if kind=='diffid':
+                    c=dict(r.config);c['rootfs']=dict(c['rootfs']);c['rootfs']['diff_ids']=['sha256:'+'0'*64,digest(tar([('second',b'second')]))]
+                    data=encode(c);r.blobs[digest(data)]=data;m['config']=descriptor(data,OCI+'config.v1+json');r.manifest=encode(m)
+                gates=LayerBarriers(r)
+                with r:
+                    p=pull_process(w,r,binary,env=env)
+                    try:
+                        assert gates.started[0].wait(5) and gates.started[1].wait(5),'two-worker cleanup needs two available CPUs'
+                        workers=owned_workers(p)
+                        if kind.startswith('later'):gates.release(1)
+                        elif kind in ('diffid','extract'):gates.release(0)
+                        else:p.send_signal({'term':signal.SIGTERM,'int':signal.SIGINT,'kill':signal.SIGKILL}[kind])
+                        out,err=p.communicate(timeout=3)
+                        assert p.returncode!=0 and out==b'',(kind,p.returncode,out,err)
+                        if kind=='later-http':assert b'registry HTTP status 503' in err,err
+                        if kind in ('later-size','later-digest'):assert b'descriptor digest or size mismatch' in err,err
+                        if kind=='diffid':assert b'DiffID mismatch' in err,err
+                        assert not published_roots(w),kind
+                        if kind=='kill':
+                            workers_dead(workers,reaped=False)
+                            for pid in workers:assert os.waitpid(pid,0)[0]==pid
+                        else:workers_dead(workers)
+                        held=0 if kind.startswith('later') else 1
+                        assert gates.closed[held].wait(3),'held sibling socket survived'
+                        # Recovery reclaims the failed stage under the retained lock.
+                        r.request_hook=None;r.responses={}
+                        fresh=Registry([tar([('retry',b'recovered')])]);r.blobs=fresh.blobs;r.manifest=fresh.manifest
+                        call('pull','--root',w,'--http-loopback',r.ref)
+                        assert (published_roots(w)[0]/'retry').read_bytes()==b'recovered'
+                    finally:
+                        gates.release_all()
+                        if p.poll() is None:p.terminate();p.communicate(timeout=5)
+                gates.close()
+            print('parallel cleanup',kind,'prompt cancellation/reaping/socket close/no publication/retry PASS',flush=True)
+    finally:
+        assert libc.prctl(36,old.value,0,0,0)==0
+
+
+def parallel_validation():
+    for kind in ('extra-diff','missing-diff','last-media','last-digest','last-size','129'):
+        with tempfile.TemporaryDirectory() as w:
+            r=Registry([tar([('one',b'one')]),tar([('two',b'two')])]);m=json.loads(r.manifest);c=dict(r.config)
+            c['rootfs']=dict(c['rootfs']);diffs=list(c['rootfs']['diff_ids'])
+            if kind=='extra-diff':diffs.append(diffs[0])
+            elif kind=='missing-diff':diffs.pop()
+            elif kind=='last-media':m['layers'][-1]['mediaType']='unsupported'
+            elif kind=='last-digest':m['layers'][-1]['digest']='sha256:bad'
+            elif kind=='last-size':m['layers'][-1]['size']=64*1024*1024+1
+            else:m['layers']=[m['layers'][0]]*129;diffs=[diffs[0]]*129
+            c['rootfs']['diff_ids']=diffs;data=encode(c);r.blobs[digest(data)]=data;m['config']=descriptor(data,OCI+'config.v1+json');r.manifest=encode(m)
+            with r:
+                call('pull','--root',w,'--http-loopback',r.ref,ok=False)
+                assert len(r.requests)==2,(kind,r.requests)
+                assert not published_roots(w)
+        print('pre-fanout complete validation',kind,'PASS',flush=True)
+
+
+def parallel_faults(binary):
+    for cpus in ('-1','0','1','2','3','64'):
+        slots=max(1,min(int(cpus),4))
+        with tempfile.TemporaryDirectory() as w:
+            r=Registry([tar([('layer'+str(i),b'ok')]) for i in range(6)]);gates=LayerBarriers(r)
+            with r:
+                p=pull_process(w,r,binary,env=dict(os.environ,GERANIUM_PULL_CPUS=cpus))
+                try:
+                    for i in range(slots):assert gates.started[i].wait(5),(cpus,i)
+                    assert not gates.started[slots].wait(.2),(cpus,'wrong fallback/cap')
+                    gates.release_all();out,err=p.communicate(timeout=5)
+                    assert p.returncode==0 and out==b'',(cpus,out,err)
+                finally:
+                    gates.release_all()
+                    if p.poll() is None:p.terminate();p.communicate(timeout=5)
+            gates.close()
+        print('actual sysconf fallback CPUs',cpus,'slots',slots,'PASS',flush=True)
+    for fault in ('fork1','fork2','stage2','worker-sync','map'):
+        with tempfile.TemporaryDirectory() as w:
+            r=Registry([tar([('first',b'ok')]),tar([('second',b'ok')])]);gates=LayerBarriers(r)
+            with r:
+                p=pull_process(w,r,binary,env=dict(os.environ,GERANIUM_PULL_FAULT=fault,GERANIUM_PULL_CPUS='2'))
+                try:
+                    workers={}
+                    if fault in ('worker-sync','map'):
+                        assert gates.started[0].wait(5) and gates.started[1].wait(5)
+                        workers=owned_workers(p);gates.release(0)
+                    out,err=p.communicate(timeout=3)
+                    assert p.returncode!=0 and out==b'',(fault,out,err)
+                    assert not published_roots(w),(fault,err)
+                    if workers:
+                        workers_dead(workers)
+                        assert gates.closed[1].wait(3),(fault,'sibling socket not closed')
+                    r.request_hook=None
+                    call('pull','--root',w,'--http-loopback',r.ref)
+                    assert len(published_roots(w))==1
+                finally:
+                    gates.release_all()
+                    if p.poll() is None:p.terminate();p.communicate(timeout=5)
+            gates.close()
+        print('owned worker fault',fault,'cleanup/no publication/retry PASS',flush=True)
+
+
+def caller_line(pipe,timeout=3):
+    data=b'';deadline=time.monotonic()+timeout
+    while b'\n' not in data:
+        remaining=deadline-time.monotonic()
+        assert remaining>0,'caller readiness deadline'
+        ready,_,_=select.select([pipe],[],[],remaining)
+        assert ready,'caller readiness deadline'
+        byte=os.read(pipe.fileno(),1)
+        assert byte,'caller exited before readiness'
+        data+=byte
+    return data
+
+
+def parallel_caller(binary):
+    selected=os.environ.get('GERANIUM_CALLER_CASE')
+    modes=(selected,) if selected else ('handler','ignore','nocldwait','pending','during','ignore-int','ignore-term','masked-int','masked-term')
+    for mode in modes:
+        with tempfile.TemporaryDirectory() as w:
+            sentinel=pathlib.Path(w)/'caller-sentinel';sentinel.write_bytes(b'owned')
+            r=Registry([tar([('one',b'one')]),tar([('two',b'two')])]);gates=LayerBarriers(r)
+            with r:
+                p=subprocess.Popen([str(binary),w,r.ref,str(sentinel),mode],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                                   env=dict(os.environ,GERANIUM_PULL_CPUS='2'))
+                try:
+                    other=None
+                    if mode in ('handler','pending','during','ignore','nocldwait'):
+                        other=int(caller_line(p.stdout).split()[1])
+                    assert gates.started[0].wait(5),'first request missing'
+                    if mode.startswith('ignore-'):
+                        p.send_signal(signal.SIGINT if mode=='ignore-int' else signal.SIGTERM)
+                        assert not gates.closed[0].wait(.3),'ignored signal cancelled transfer'
+                        assert p.poll() is None,'ignored signal terminated pull'
+                    if mode.startswith('masked-'):
+                        p.send_signal(signal.SIGINT if mode=='masked-int' else signal.SIGTERM)
+                        assert not gates.closed[0].wait(.3),'masked signal cancelled transfer'
+                        assert p.poll() is None,'masked signal terminated pull'
+                    if mode not in ('ignore','nocldwait'):
+                        assert gates.started[1].wait(5),'second request missing'
+                        workers=owned_workers(p);active=0
+                        for pid,fd in workers.items():
+                            os.close(fd)
+                            if pid==other:continue
+                            paths=[os.readlink(x) for x in pathlib.Path(f'/proc/{pid}/fd').iterdir()]
+                            active+=1
+                            assert not any('caller-sentinel' in x or '.lock-' in x or x.endswith('/rootfs') for x in paths),paths
+                            if mode.startswith('ignore-'):
+                                ignored=int(next(line.split()[1] for line in pathlib.Path(f'/proc/{pid}/status').read_text().splitlines() if line.startswith('SigIgn:')),16)
+                                sig=signal.SIGINT if mode=='ignore-int' else signal.SIGTERM
+                                assert ignored & (1 << (sig-1)),('worker lost ignored disposition',sig)
+                                os.kill(pid,sig)
+                            if mode.startswith('masked-'):
+                                blocked=int(next(line.split()[1] for line in pathlib.Path(f'/proc/{pid}/status').read_text().splitlines() if line.startswith('SigBlk:')),16)
+                                sig=signal.SIGINT if mode=='masked-int' else signal.SIGTERM
+                                assert blocked & (1 << (sig-1)),('worker lost caller mask',sig)
+                                os.kill(pid,sig)
+                        assert active==2,active
+                    else:
+                        assert not gates.started[1].wait(.2),'auto-reaping caller must use serial acquisition'
+                        assert pathlib.Path(f'/proc/{p.pid}/task/{p.pid}/children').read_text().split()==[str(other)],'serial fallback created workers'
+                    if mode in ('during','ignore','nocldwait'):
+                        fd=worker_pidfd(other)
+                        p.send_signal(signal.SIGUSR1);wait_fds([fd],3);os.close(fd)
+                    gates.release_all();out,err=p.communicate(timeout=5)
+                    assert p.returncode==0 and out==b'',(mode,p.returncode,out,err)
+                    assert len(published_roots(w))==1
+                finally:
+                    gates.release_all()
+                    if p.poll() is None:p.kill();p.communicate(timeout=5)
+            gates.close()
+        print('typed caller',mode,'notifications/dispositions/mask/ownership/transfer PASS',flush=True)
+
+
+def parallel_callbacks(binary):
+    selected=os.environ.get('GERANIUM_CALLBACK_CASE')
+    kinds=(selected,) if selected else ('http','digest','json','sync','startup','guard','blocking')
+    for kind in kinds:
+        with tempfile.TemporaryDirectory() as w:
+            sentinel=pathlib.Path(w)/'caller-sentinel';sentinel.write_bytes(b'owned')
+            trace=pathlib.Path(str(sentinel)+'.trace')
+            if kind=='blocking':os.mkfifo(str(sentinel)+'.gate',0o600)
+            r=Registry([tar([('one',b'one')]),tar([('two',b'two')])]);gates=LayerBarriers(r)
+            identity=gates.ids[1]
+            if kind in ('http','blocking'):r.responses['/v2/fixture/blobs/'+identity]=(503,{},b'failure')
+            if kind=='digest':r.blobs[identity]=b'x'*len(r.blobs[identity])
+            if kind=='json':
+                route=r.route
+                def token_failure(path,headers):
+                    if path.endswith(identity):
+                        return 401,{'WWW-Authenticate':f'Bearer realm="http://127.0.0.1:{r.server.server_port}/token?bad=1",service="fixture",scope="repository:fixture:pull"'},b''
+                    if path.startswith('/token?'):return 200,{},b'{'
+                    return route(path,headers)
+                r.route=token_failure
+            fault={'sync':'worker-sync','startup':'worker-start','guard':'worker-guard'}.get(kind,'')
+            with r:
+                p=subprocess.Popen([str(binary),w,r.ref,str(sentinel),'callback-block' if kind=='blocking' else 'callback'],
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                                   env=dict(os.environ,GERANIUM_PULL_CPUS='2',GERANIUM_PULL_FAULT=fault))
+                try:
+                    workers={}
+                    if kind not in ('startup','guard'):
+                        assert gates.started[0].wait(5) and gates.started[1].wait(5)
+                        workers=owned_workers(p);gates.release(1)
+                    try:
+                        out,err=p.communicate(timeout=3)
+                    except subprocess.TimeoutExpired as error:
+                        print('worker failure completion timed out',kind,'caller',p.pid,
+                              'callback trace',trace.read_text() if trace.exists() else '',
+                              'held sibling socket closed',gates.closed[0].is_set(),
+                              'stderr',error.stderr,flush=True)
+                        raise
+                    assert p.returncode!=0 and out==b'',(kind,p.returncode,out,err)
+                    assert trace.exists(),'caller callback did not run'
+                    observed=list(map(int,trace.read_text().split()))
+                    print('callback trace',kind,'caller',p.pid,'observed',observed,'status',p.returncode,'stderr',err.decode(),flush=True)
+                    assert observed and all(pid==p.pid for pid in observed),('inherited worker callback executed',kind,observed)
+                    assert not published_roots(w)
+                    if workers:
+                        workers_dead(workers)
+                        assert gates.closed[0].wait(3),'failed worker did not cancel held sibling'
+                    r.request_hook=None;r.responses={}
+                    fresh=Registry([tar([('retry',b'ok')])]);r.blobs=fresh.blobs;r.manifest=fresh.manifest;r.route=Registry.route.__get__(r)
+                    call('pull','--root',w,'--http-loopback',r.ref)
+                    assert (published_roots(w)[0]/'retry').read_bytes()==b'ok'
+                finally:
+                    gates.release_all()
+                    if p.poll() is None:
+                        # A v1 worker can be blocked in the inherited callback.
+                        # SIGTERM invokes the coordinator and kills all its workers.
+                        p.terminate()
+                        p.communicate(timeout=5)
+            gates.close()
+        print('failed worker',kind,'no inherited callbacks/prompt sibling cleanup/retry PASS',flush=True)
+
+
+def parallel_auth_redirect():
+    with tempfile.TemporaryDirectory() as w, Registry() as target:
+        r=Registry([tar([('auth'+str(i),b'private token')]) for i in range(6)])
+        r.auth=True;target.blobs=r.blobs
+        ids=[d['digest'] for d in json.loads(r.manifest)['layers']]
+        route=r.route
+        def refreshed(path,headers):
+            if path.startswith('/token?layer='):
+                index=int(path.split('layer=',1)[1].split('&',1)[0])
+                return 200,{},encode(dict(token='layer-token-'+str(index)))
+            identity=path.rsplit('/',1)[-1]
+            if identity in ids:
+                index=ids.index(identity)
+                if headers.get('Authorization')!='Bearer layer-token-'+str(index):
+                    return 401,{'WWW-Authenticate':f'Bearer realm="http://127.0.0.1:{r.server.server_port}/token?layer={index}",service="fixture",scope="repository:fixture:pull"'},b''
+                return 307,{'Location':f'http://127.0.0.1:{target.server.server_port}'+path},b''
+            return route(path,headers)
+        r.route=refreshed
+        with r:
+            call('pull','--root',w,'--http-loopback',r.ref)
+            assert len([x for x in r.requests if x.startswith('/token?layer=')])==6,r.requests
+            for i,identity in enumerate(ids):
+                auth=[h.get('Authorization') for path,h in zip(r.requests,r.headers) if path.endswith(identity)]
+                assert auth==['Bearer fixture-token','Bearer layer-token-'+str(i)],auth
+            assert len(target.requests)==6
+            assert all('Authorization' not in h for h in target.headers),target.headers
+            assert len(list(published_roots(w)[0].glob('auth*')))==6
+    print('parallel independent auth refresh across windows and cross-origin redirect token stripping PASS')
 
 def remove():
     with tempfile.TemporaryDirectory() as w, Registry() as r:
@@ -184,7 +652,7 @@ def transport():
         cert=pathlib.Path(w)/'cert.pem';key=pathlib.Path(w)/'key.pem'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=fixture','-addext','subjectAltName=IP:127.0.0.1'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
         env=dict(os.environ,SSL_CERT_FILE=str(cert))
-        r=Registry();r.tls=(cert,key);r.auth=True;r.chunked=True
+        r=Registry([tar([('tls'+str(i),b'verified')]) for i in range(3)]);r.tls=(cert,key);r.auth=True;r.chunked=True
         manifest=r.manifest
         index=encode(dict(schemaVersion=2,mediaType=OCI+'index.v1+json',manifests=[dict(descriptor(manifest,OCI+'manifest.v1+json'),platform=dict(os='linux',architecture='wrong')),dict(descriptor(manifest,OCI+'manifest.v1+json'),platform=dict(os='linux',architecture=r.config['architecture']))]))
         r.responses['/v2/fixture/manifests/latest']=(200,{'Content-Type':OCI+'index.v1+json'},index)
@@ -473,7 +941,7 @@ def authority():
         w=pathlib.Path(w);helper=w/'authority';key=w/'server.key';cert=w/'server.pem'
         command=[os.environ.get('CC','cc')]
         for flags in ('CPPFLAGS','CFLAGS'): command+=shlex.split(os.environ.get(flags,'-O2 -Wall -Wextra -Werror -pedantic' if flags=='CFLAGS' else ''))
-        command+=['-std=c99',str(BASE/'tests/registry-authority.c'),str(BASE/'src/json.c')]
+        command+=['-std=c99',str(BASE/'tests/registry-authority.c'),str(BASE/'src/json.c'),str(BASE/'src/fatal.c')]
         for flags in ('LDFLAGS','LDLIBS'): command+=shlex.split(os.environ.get(flags,''))
         subprocess.run(command+['-lssl','-lcrypto','-lyyjson','-o',str(helper)],check=True)
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=fixture','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -621,13 +1089,15 @@ def json_contract():
 
 # Single common selector list, consumed by images.sh in native/musl/CI gates.
 # image-selectors.py checks every no-argument behavior against this registration.
-CASES=('cli','pull','remove','create','hardlinks','transport','plain_bounds',
+CASES=('parallel_overlap','parallel_window','parallel_cleanup','parallel_validation','parallel_auth_redirect','cli','pull','remove','create','hardlinks','transport','plain_bounds',
        'layers','lower_directories','reject_layers','integrity','partial',
        'lifecycle','path_search','opaque','raw_transport','slow_transport',
        'optional_metadata','long_metadata','authority','default_host','raw_chunks','json_contract')
 if __name__=='__main__':
     if sys.argv[1]=='--list':
         print('\n'.join(CASES))
+    elif sys.argv[1] in ('parallel_faults','parallel_caller','parallel_callbacks'):
+        globals()[sys.argv[1]](sys.argv[2])
     elif sys.argv[1] in CASES or sys.argv[1]=='race':
         globals()[sys.argv[1]]()
     else:

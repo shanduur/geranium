@@ -111,13 +111,13 @@ esac
     printf 'CC = %s\nCPPFLAGS = %s\nCFLAGS = %s\nLDFLAGS = %s\nLDLIBS = %s\nPREFIX = %s\nDESTDIR =\n' "$CC" "$CPPFLAGS" "$CFLAGS" "$LDFLAGS" "$LDLIBS" "$PREFIX"
     printf 'BACKEND = src/backend_%s.c\n' "$backend"
     printf 'LIBRARY = %s\nEXPORTS = %s\nPICFLAGS = %s\nSHARED_FLAGS = %s\nRUNPATH_FLAGS = %s\n' "$library" "$exports" "$picflags" "$shared_flags" "$runpath_flags"
-    printf '%s\n' 'CORE_OBJECTS = geranium.o image.o registry.o json.o layer.o backend.o' 'PROGRAMS = gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi' 'all: $(LIBRARY) $(PROGRAMS)'
+    printf '%s\n' 'CORE_OBJECTS = geranium.o image.o registry.o json.o layer.o backend.o fatal.o' 'PROGRAMS = gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi' 'all: $(LIBRARY) $(PROGRAMS)'
     printf '%s\n' '$(LIBRARY): $(CORE_OBJECTS) $(EXPORTS) Makefile'
     printf '\t%s\n' '"$(CC)" $(CFLAGS) $(LDFLAGS) $(SHARED_FLAGS) -o $@ $(CORE_OBJECTS) $(LDLIBS) -lssl -lcrypto -lz -lyyjson -lskarnet'
-    for core in geranium image registry json layer backend; do
+    for core in geranium image registry json layer backend fatal; do
         source="src/$core.c"
         if [ "$core" = backend ]; then source='$(BACKEND)'; fi
-        printf '%s.o: %s src/geranium.h src/image.h src/registry.h src/json.h src/layer.h src/backend.h Makefile\n' "$core" "$source"
+        printf '%s.o: %s src/geranium.h src/image.h src/registry.h src/json.h src/layer.h src/backend.h src/fatal.h Makefile\n' "$core" "$source"
         printf '\t"$(CC)" $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -std=c99 -Wall -Wextra -c %s -o $@\n' "$source"
     done
     for verb in create start run stop inspect logs rm pull rmi; do
@@ -129,7 +129,7 @@ esac
     printf '%s\n' 'check-format:'
     printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c'
     printf '%s\n' 'test: all'
-    for script in dependencies json output library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race; do
+    for script in dependencies json output library command-names lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race pull-workers pull-fatal; do
         printf '\tMAKE="$(MAKE)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LDLIBS="$(LDLIBS)" sh tests/%s.sh\n' "$script"
     done
     printf '%s\n' 'install: all'
@@ -139,6 +139,6 @@ esac
 } > Makefile
 # bmake and coarse filesystems can treat a new configuration as the same timestamp.
 # Invalidate only this build's products after all probes and Makefile creation succeed.
-rm -f geranium.o image.o registry.o json.o layer.o backend.o libgeranium.so libgeranium.dylib \
+rm -f geranium.o image.o registry.o json.o layer.o backend.o fatal.o libgeranium.so libgeranium.dylib \
     gu-create gu-start gu-run gu-stop gu-inspect gu-logs gu-rm gu-pull gu-rmi
 printf 'configured for %s backend, %s shared library with %s\n' "$backend" "$format" "$CC"
