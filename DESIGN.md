@@ -1,7 +1,8 @@
 # Geranium design
 
-The README and executable tests describe the implemented lifecycle and image
-increment. Future native backends and broader OCI compatibility remain design scope.
+See the [README](README.md) for usage and the [technical reference](REFERENCE.md)
+for implemented behavior and limits. Future native backends and broader OCI
+compatibility remain design scope.
 
 ## Scope
 
@@ -109,7 +110,8 @@ cannot run inherited caller atexit/on_exit callbacks or delay completion EOF. Wo
 exclude the image lock, rootfs and unrelated caller descriptors. The backend
 registers Linux parent-death SIGKILL before worker I/O, checking the parent PID
 again to close the registration race. Other backends use serial pulls rather
-than leaving orphanable helpers. See README for buffer limits and crash limits.
+than leaving orphanable helpers. See [parallel downloads](REFERENCE.md#parallel-downloads)
+for buffer limits and crash limits.
 
 The process-lifetime coordinator temporarily installs SIGINT/SIGTERM handlers
 unless the caller ignores those signals; workers also retain ignored actions.
@@ -144,7 +146,8 @@ TLS and SHA256, zlib for gzip, and external yyjson for JSON decoding. No TLS
 cryptography, curl, archive library, or third-party implementation is vendored.
 Anonymous Bearer challenge requests carry no credentials. Cross-origin redirects strip tokens;
 HTTPS downgrade redirects fail. Resource bounds and the synchronous resolver's
-unbounded delay are explicit in README. No external runtime helper is introduced.
+unbounded delay are explicit in the [registry limits](REFERENCE.md#registry-limits).
+No external runtime helper is introduced.
 
 Private image/registry code borrows yyjson values directly from an owning
 `yyjson_doc`; no separate JSON tree is built. The document stays alive until all
