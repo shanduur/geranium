@@ -24,8 +24,7 @@ make
 ```
 
 On other distributions, install a C99 compiler, make, and development libraries
-for OpenSSL, zlib, yyjson, and skalibs. See [build and installation](REFERENCE.md#build-and-installation)
-for custom prefixes and staged installs. Runtime programs do not need Python.
+for OpenSSL, zlib, yyjson, and skalibs. Runtime programs do not need Python.
 
 ## Run a container
 
@@ -48,8 +47,6 @@ or remove it:
 
 State defaults to `$HOME/.local/state/geranium`. Use `--root /absolute/path` on
 each command to keep a separate store. Store state on a local filesystem.
-
-Already have an unpacked rootfs? See the [rootfs example and requirements](REFERENCE.md#state-and-rootfs).
 
 ## Commands
 
@@ -80,13 +77,10 @@ Workload commands must use absolute paths unless supplied by an image's defaults
   cgroups, seccomp, or capabilities.
 - Logs keep the first 1 MiB of output per execution. Extra output is discarded.
 
-See the [technical reference](REFERENCE.md) for image formats, storage rules,
-resource limits, and failure behavior.
-
 ## Development
 
 Run `make test` after building. The full Linux isolation suite needs a static
-BusyBox fixture and permitted namespaces. See [test requirements](REFERENCE.md#tests).
+BusyBox fixture and permitted namespaces.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers code style and the locked uv/Ruff/ty
 checks. [DESIGN.md](DESIGN.md) explains the architecture.
