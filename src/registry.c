@@ -18,25 +18,31 @@
 #define HEAD_LIMIT 32768
 #define IDLE_TIMEOUT 30000
 #define BODY_TIMEOUT 300000
+
 struct url {
 	char host[256], port[8], path[4096], origin[300], authority[256];
 	int tls;
 };
+
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium registry: %s\n", s);
 	geranium_fatal_exit(1);
 }
+
 static long long now(void)
 {
 	struct timespec t;
+
 	if (clock_gettime(CLOCK_MONOTONIC, &t) < 0)
 		fail("clock");
 	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
+
 static struct url parse(const char *s, int local)
 {
 	struct url u;
+
 	memset(&u, 0, sizeof u);
 	if (!strncmp(s, "https://", 8)) {
 		u.tls = 1;
@@ -47,6 +53,7 @@ static struct url parse(const char *s, int local)
 		strcpy(u.port, "80");
 	} else
 		fail("HTTPS required (HTTP only for explicit loopback fixtures)");
+
 	const char *slash = strchr(s, '/');
 	size_t n = slash ? (size_t)(slash - s) : strlen(s);
 	if (!n || n >= sizeof u.host)
@@ -62,6 +69,7 @@ static struct url parse(const char *s, int local)
 			fail("invalid port");
 		strcpy(u.port, p);
 	}
+
 	unsigned port = 0;
 	for (p = u.port; *p; p++) {
 		if (*p < '0' || *p > '9')
@@ -78,6 +86,7 @@ static struct url parse(const char *s, int local)
 			fail("invalid host");
 	if (!u.tls && strcmp(u.host, "127.0.0.1"))
 		fail("HTTP requires literal 127.0.0.1");
+
 	if (!slash)
 		slash = "/";
 	if (strlen(slash) >= sizeof u.path)
@@ -91,12 +100,15 @@ static struct url parse(const char *s, int local)
 		       u.tls);
 	return u;
 }
+
 static void waitfd(int fd, int events, long long end)
 {
 	struct pollfd p = { fd, (short)events, 0 };
 	int n;
+
 	for (;;) {
 		long long left = end - now();
+
 		if (left <= 0)
 			fail("request deadline");
 		n = poll(&p, 1, (int)left);
@@ -107,22 +119,27 @@ static void waitfd(int fd, int events, long long end)
 	if (n <= 0)
 		fail("request timeout or poll failure");
 }
+
 struct connection {
 	int fd;
 	SSL_CTX *ctx;
 	SSL *ssl;
 	long long end, idle;
 };
+
 static long long deadline(const struct connection *c)
 {
 	return c->idle < c->end ? c->idle : c->end;
 }
+
 static struct connection connect_url(struct url *u)
 {
 	struct connection c;
+
 	memset(&c, 0, sizeof c);
 	c.fd = -1;
 	c.end = c.idle = now() + IDLE_TIMEOUT;
+
 	struct addrinfo hints, *list = NULL;
 	memset(&hints, 0, sizeof hints);
 	hints.ai_socktype = SOCK_STREAM;
@@ -154,6 +171,7 @@ static struct connection connect_url(struct url *u)
 	freeaddrinfo(list);
 	if (c.fd < 0)
 		fail("connection failed");
+
 	if (u->tls) {
 		c.ctx = SSL_CTX_new(TLS_client_method());
 		if (!c.ctx)
@@ -174,6 +192,7 @@ static struct connection connect_url(struct url *u)
 			fail("TLS hostname verification");
 		for (;;) {
 			int n = SSL_connect(c.ssl);
+
 			if (n == 1)
 				break;
 			int e = SSL_get_error(c.ssl, n);
@@ -189,6 +208,7 @@ static struct connection connect_url(struct url *u)
 	}
 	return c;
 }
+
 static int transfer(struct connection *c, void *data, size_t size, int writing)
 {
 	for (;;) {
@@ -231,6 +251,7 @@ static int transfer(struct connection *c, void *data, size_t size, int writing)
 		fail("socket I/O failed");
 	}
 }
+
 /* Nonempty accepted values make stored values a reliable presence marker. */
 static void header(char *out, size_t cap, const char *value)
 {
@@ -238,10 +259,12 @@ static void header(char *out, size_t cap, const char *value)
 		fail("duplicate, empty or oversized header");
 	strcpy(out, value);
 }
+
 static void validate_headers(const unsigned char *wire, size_t size)
 {
 	for (size_t i = 0; i < size; i++) {
 		unsigned char c = wire[i];
+
 		if (c == '\r') {
 			if (i + 1 >= size || wire[i + 1] != '\n')
 				fail("invalid HTTP line ending");
@@ -250,14 +273,17 @@ static void validate_headers(const unsigned char *wire, size_t size)
 			fail("invalid HTTP header byte");
 	}
 }
+
 static struct response request(struct url *u, const char *token, size_t limit)
 {
 	struct connection c = connect_url(u);
 	char req[20000];
+
 	if (token)
 		for (const char *p = token; *p; p++)
 			if ((unsigned char)*p <= 32 || (unsigned char)*p >= 127)
 				fail("invalid bearer token");
+
 	int len = snprintf(
 		req, sizeof req,
 		"GET %s HTTP/1.1\r\nHost: %s\r\nAccept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json\r\nConnection: close\r\n%s%s%s\r\n",
@@ -267,14 +293,17 @@ static struct response request(struct url *u, const char *token, size_t limit)
 		fail("request too long");
 	for (int off = 0; off < len;) {
 		int n = transfer(&c, req + off, (size_t)(len - off), 1);
+
 		if (!n)
 			fail("short request");
 		off += n;
 	}
+
 	unsigned char *wire = malloc(HEAD_LIMIT + 1);
 	if (!wire)
 		fail("allocation");
 	size_t total = 0, body = 0;
+
 	/* Read headers without depending on server EOF; body framing is mandatory. */
 	while (!body) {
 		if (total >= HEAD_LIMIT)
@@ -287,9 +316,11 @@ static struct response request(struct url *u, const char *token, size_t limit)
 			body = total;
 	}
 	validate_headers(wire, total);
+
 	if (total < 7 || memcmp(wire, "HTTP/1.", 7))
 		fail("invalid HTTP status");
 	wire[total] = 0;
+
 	struct response r;
 	memset(&r, 0, sizeof r);
 	char *save, *line = strtok_r((char *)wire, "\r\n", &save);
@@ -304,6 +335,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 	char length[32] = "", encoding[64] = "";
 	while ((line = strtok_r(NULL, "\r\n", &save))) {
 		char *colon = strchr(line, ':');
+
 		if (!colon || colon == line || line[0] == ' ' ||
 		    line[0] == '\t')
 			fail("invalid HTTP header");
@@ -337,6 +369,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 	}
 	if ((*length && *encoding) || (!*length && !*encoding))
 		fail("ambiguous or missing HTTP framing");
+
 	c.end = now() + BODY_TIMEOUT;
 	c.idle = now() + IDLE_TIMEOUT;
 	r.data = malloc(limit + 1);
@@ -344,6 +377,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 		fail("allocation");
 	if (*length) {
 		size_t size = 0;
+
 		for (char *p = length; *p; p++) {
 			if (*p < '0' || *p > '9' || size > limit / 10)
 				fail("invalid Content-Length");
@@ -355,6 +389,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 			size_t left = size - r.size;
 			int n = transfer(&c, r.data + r.size,
 					 left > 32768 ? 32768 : left, 0);
+
 			if (!n)
 				fail("truncated HTTP body");
 			r.size += (size_t)n;
@@ -365,6 +400,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 		for (;;) {
 			char chunk[32];
 			size_t n = 0;
+
 			for (;;) {
 				if (n >= sizeof chunk - 1 ||
 				    transfer(&c, chunk + n, 1, 0) != 1)
@@ -380,6 +416,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 			for (size_t i = 0; i < n - 2; i++) {
 				unsigned char byte = (unsigned char)chunk[i];
 				unsigned v;
+
 				if (byte >= '0' && byte <= '9')
 					v = (unsigned)(byte - '0');
 				else if (byte >= 'a' && byte <= 'f')
@@ -400,6 +437,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 				int k = transfer(&c, r.data + r.size,
 						 left > 32768 ? 32768 : left,
 						 0);
+
 				if (!k)
 					fail("truncated chunk");
 				r.size += (size_t)k;
@@ -415,25 +453,30 @@ static struct response request(struct url *u, const char *token, size_t limit)
 		}
 	}
 	r.data[r.size] = 0;
+
 	free(wire);
 	SSL_free(c.ssl);
 	SSL_CTX_free(c.ctx);
 	close(c.fd);
 	return r;
 }
+
 struct response registry_get(const char *url, const char *token, int local,
 			     size_t limit)
 {
 	struct url u = parse(url, local);
 	const char *auth = token;
+
 	for (int count = 0; count < 5; count++) {
 		struct response r = request(&u, auth, limit);
+
 		if (r.status != 301 && r.status != 302 && r.status != 303 &&
 		    r.status != 307 && r.status != 308)
 			return r;
 		struct url next;
 		if (r.location[0] == '/' && r.location[1] != '/') {
 			char s[4600];
+
 			(void)snprintf(s, sizeof s, "%s://%s%s",
 				       u.tls ? "https" : "http", u.authority,
 				       r.location);
@@ -451,12 +494,15 @@ struct response registry_get(const char *url, const char *token, int local,
 	struct response r = { 0 };
 	return r;
 }
+
 static void query(char *out, size_t cap, const char *s)
 {
 	static const char hex[] = "0123456789ABCDEF";
 	size_t n = 0;
+
 	for (; *s; s++) {
 		unsigned char c = (unsigned char)*s;
+
 		if (n + 3 >= cap)
 			fail("token query too long");
 		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -470,6 +516,7 @@ static void query(char *out, size_t cap, const char *s)
 	}
 	out[n] = 0;
 }
+
 char *registry_token(const char *challenge, int local)
 {
 	if (strncmp(challenge, "Bearer ", 7))
@@ -514,6 +561,7 @@ char *registry_token(const char *challenge, int local)
 		if (*p && *p != ',')
 			fail("invalid Bearer challenge delimiter");
 	}
+
 	struct url u = parse(realm, local);
 	(void)u;
 	char a[3073], b[3073], url[11000];
@@ -526,6 +574,7 @@ char *registry_token(const char *challenge, int local)
 	struct response r = registry_get(url, NULL, local, 1024 * 1024);
 	if (r.status != 200)
 		fail("anonymous token request failed");
+
 	yyjson_doc *doc = json_parse(r.data, r.size);
 	yyjson_val *j = yyjson_doc_get_root(doc), *t = json_get(j, "token");
 	if (!t)

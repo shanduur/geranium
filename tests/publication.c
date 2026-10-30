@@ -12,10 +12,12 @@ static int observed_container;
 static int test_fcntl(int fd, int command, ...)
 {
 	va_list arguments;
+
 	va_start(arguments, command);
 	int result;
 	if (command == F_GETLK || command == F_SETLK || command == F_SETLKW) {
 		struct flock *lock = va_arg(arguments, struct flock *);
+
 		if (command == F_GETLK && publish_during_observation) {
 			publish_during_observation = 0;
 			code_write(observed_container, 42);
@@ -34,6 +36,7 @@ static int test_fcntl(int fd, int command, ...)
 int main(void)
 {
 	char path[] = "/tmp/geranium-publication-XXXXXX";
+
 	if (!mkdtemp(path))
 		return 1;
 	int container = open(path, O_RDONLY | O_DIRECTORY);
@@ -49,6 +52,7 @@ int main(void)
 		      fstatat(container, "exitcode", &result,
 			      AT_SYMLINK_NOFOLLOW) == 0 &&
 		      code_read(container) == 42;
+
 	remove_tree(container);
 	close(container);
 	rmdir(path);

@@ -4,6 +4,7 @@
 int main(void)
 {
 	int fd[2];
+
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) < 0 ||
 	    fcntl(fd[0], F_SETFL, O_NONBLOCK) < 0)
 		return 2;
@@ -18,6 +19,7 @@ int main(void)
 	c.idle = now() + 10000;
 	for (size_t i = 0; i < sizeof payload; i++) {
 		char byte;
+
 		if (transfer(&c, &byte, 1, 0) != 1)
 			return 2;
 		if (!i)

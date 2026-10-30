@@ -12,11 +12,13 @@
 #include <openssl/evp.h>
 #include <zlib.h>
 #define EXPAND_LIMIT (1024ULL * 1024 * 1024)
+
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium layer: %s\n", s);
 	geranium_fatal_exit(1);
 }
+
 static void check(int n, const char *s)
 {
 	if (n < 0) {
@@ -24,17 +26,22 @@ static void check(int n, const char *s)
 		geranium_fatal_exit(1);
 	}
 }
+
 static int directory(int fd, const char *s)
 {
 	int n = openat(fd, s, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
 	check(n, "layer directory (symlinks forbidden)");
 	return n;
 }
+
 static void write_all(int fd, const void *data, size_t size)
 {
 	const char *p = data;
+
 	while (size) {
 		ssize_t n = write(fd, p, size);
+
 		if (n <= 0) {
 			if (n < 0 && errno == EINTR)
 				continue;
@@ -44,6 +51,7 @@ static void write_all(int fd, const void *data, size_t size)
 		size -= (size_t)n;
 	}
 }
+
 void image_delete_tree(int fd)
 {
 	check(fchmod(fd, 0700), "cleanup permissions");
@@ -77,9 +85,11 @@ void image_delete_tree(int fd)
 	}
 	check(closedir(d), "cleanup close");
 }
+
 static void erase(int fd, const char *s)
 {
 	struct stat st;
+
 	if (fstatat(fd, s, &st, AT_SYMLINK_NOFOLLOW) < 0) {
 		if (errno == ENOENT)
 			return;
@@ -94,10 +104,12 @@ static void erase(int fd, const char *s)
 	} else
 		check(unlinkat(fd, s, 0), "whiteout unlink");
 }
+
 static unsigned long long octal(const unsigned char *s, size_t n)
 {
 	unsigned long long v = 0;
 	size_t i = 0;
+
 	while (i < n && s[i] == ' ')
 		i++;
 	for (; i < n && s[i] >= '0' && s[i] <= '7'; i++) {
@@ -110,9 +122,11 @@ static unsigned long long octal(const unsigned char *s, size_t n)
 			fail("unsupported tar numeric encoding");
 	return v;
 }
+
 static void field(char *out, size_t cap, const unsigned char *s, size_t n)
 {
 	size_t len = 0;
+
 	while (len < n && s[len])
 		len++;
 	if (len >= cap)
@@ -123,6 +137,7 @@ static void field(char *out, size_t cap, const unsigned char *s, size_t n)
 		if (s[i])
 			fail("invalid tar string padding");
 }
+
 /* Normalize only conventional leading ./ and trailing /. Never normalize .. . */
 static void path(char *s, int directory_entry)
 {
@@ -143,6 +158,7 @@ static void path(char *s, int directory_entry)
 	for (char *p = s; *p;) {
 		char *end = strchr(p, '/');
 		size_t k = end ? (size_t)(end - p) : strlen(p);
+
 		if (!k || (k == 1 && p[0] == '.') ||
 		    (k == 2 && !memcmp(p, "..", 2)) || k > 255 || ++depth > 32)
 			fail("unsafe tar path component");
@@ -152,11 +168,13 @@ static void path(char *s, int directory_entry)
 		p = end ? end + 1 : p + k;
 	}
 }
+
 struct parents {
 	int fd[33];
 	mode_t mode[33];
 	unsigned count;
 };
+
 static int parent(int root, char *s, char **leaf, struct parents *chain)
 {
 	memset(chain, 0, sizeof *chain);
@@ -172,6 +190,7 @@ static int parent(int root, char *s, char **leaf, struct parents *chain)
 	      "temporary layer parent mode");
 	for (;;) {
 		char *slash = strchr(p, '/');
+
 		if (!slash) {
 			*leaf = p;
 			return fd;
@@ -194,29 +213,36 @@ static int parent(int root, char *s, char **leaf, struct parents *chain)
 		p = slash + 1;
 	}
 }
+
 static void parent_close(struct parents *chain)
 {
 	while (chain->count) {
 		unsigned i = --chain->count;
+
 		check(fchmod(chain->fd[i], chain->mode[i]),
 		      "restore layer directory mode");
 		check(close(chain->fd[i]), "close layer ancestor");
 	}
 }
+
 static unsigned root_mode = 0755;
+
 unsigned layer_root_mode(void)
 {
 	return root_mode;
 }
+
 struct dirmode {
 	char *path;
 	mode_t mode;
 	struct dirmode *next;
 };
+
 struct seen_path {
 	char *path;
 	struct seen_path *next;
 };
+
 static void extract(int root, int tar, int whiteouts)
 {
 	check((int)lseek(tar, 0, SEEK_SET), "rewind layer");
@@ -224,9 +250,11 @@ static void extract(int root, int tar, int whiteouts)
 	struct dirmode *modes = NULL;
 	struct seen_path *seen[4096] = { 0 };
 	size_t path_bytes = 0;
+
 	for (;;) {
 		unsigned char h[512];
 		ssize_t n = read(tar, h, sizeof h);
+
 		if (n == 0) {
 			if (zeros < 2)
 				fail("missing tar terminator");
@@ -241,6 +269,7 @@ static void extract(int root, int tar, int whiteouts)
 			zeros++;
 			continue;
 		}
+
 		if (zeros)
 			fail("nonzero tar data after terminator");
 		if (++entries > 100000)
@@ -250,6 +279,7 @@ static void extract(int root, int tar, int whiteouts)
 			actual += (i >= 148 && i < 156) ? ' ' : h[i];
 		if (octal(h + 148, 8) != actual)
 			fail("tar checksum mismatch");
+
 		if (memcmp(h + 257, "ustar", 5))
 			fail("only ustar supported");
 		unsigned long long size = octal(h + 124, 12),
@@ -268,6 +298,7 @@ static void extract(int root, int tar, int whiteouts)
 			fail("unsupported image special mode");
 		if (size > 256ULL * 1024 * 1024 || (type != '0' && size))
 			fail("invalid or excessive tar entry size");
+
 		char name[4096], prefix[156], link[101];
 		field(name, sizeof name, h, 100);
 		field(prefix, sizeof prefix, h + 345, 155);
@@ -276,11 +307,13 @@ static void extract(int root, int tar, int whiteouts)
 			char joined[4096];
 			int k = snprintf(joined, sizeof joined, "%s/%s", prefix,
 					 name);
+
 			if (k < 0 || (size_t)k >= sizeof joined)
 				fail("tar path too long");
 			strcpy(name, joined);
 		}
 		path(name, type == '5');
+
 		unsigned bucket = 2166136261U;
 		for (const unsigned char *p = (const unsigned char *)name; *p;
 		     p++)
@@ -300,6 +333,7 @@ static void extract(int root, int tar, int whiteouts)
 			fail("allocation");
 		record->next = seen[bucket];
 		seen[bucket] = record;
+
 		off_t data = lseek(tar, 0, SEEK_CUR);
 		if (data < 0)
 			fail("tar seek");
@@ -309,6 +343,7 @@ static void extract(int root, int tar, int whiteouts)
 		if ((unsigned long long)data + padded >
 		    (unsigned long long)tst.st_size)
 			fail("truncated tar payload");
+
 		if (!*name) {
 			if (type != '5')
 				fail("invalid root entry");
@@ -316,12 +351,14 @@ static void extract(int root, int tar, int whiteouts)
 				root_mode = (unsigned)mode;
 		} else {
 			char *last = strrchr(name, '/');
+
 			last = last ? last + 1 : name;
 			int wh = !strncmp(last, ".wh.", 4);
 			if (wh && (type != '0' || size))
 				fail("invalid whiteout");
 			if (wh == whiteouts) {
 				char full[4096];
+
 				strcpy(full, name);
 				char *leaf;
 				struct parents chain;
@@ -331,6 +368,7 @@ static void extract(int root, int tar, int whiteouts)
 						image_delete_tree(fd);
 					else {
 						char *target = leaf + 4;
+
 						if (!*target ||
 						    !strcmp(target, ".") ||
 						    !strcmp(target, ".."))
@@ -339,6 +377,7 @@ static void extract(int root, int tar, int whiteouts)
 					}
 				} else if (type == '5') {
 					struct stat st;
+
 					if (fstatat(fd, leaf, &st,
 						    AT_SYMLINK_NOFOLLOW) == 0 &&
 					    !S_ISDIR(st.st_mode))
@@ -374,6 +413,7 @@ static void extract(int root, int tar, int whiteouts)
 					modes = m;
 				} else if (type == '1') {
 					char target[4096];
+
 					strcpy(target, link);
 					path(target, 0);
 					char *targetleaf;
@@ -421,6 +461,7 @@ static void extract(int root, int tar, int whiteouts)
 					check(out, "layer file");
 					unsigned char buf[32768];
 					unsigned long long left = size;
+
 					while (left) {
 						size_t want =
 							left > sizeof buf ?
@@ -428,6 +469,7 @@ static void extract(int root, int tar, int whiteouts)
 								(size_t)left;
 						ssize_t got =
 							read(tar, buf, want);
+
 						if (got <= 0)
 							fail("truncated tar file");
 						write_all(out, buf,
@@ -444,19 +486,23 @@ static void extract(int root, int tar, int whiteouts)
 		if (lseek(tar, data + (off_t)padded, SEEK_SET) < 0)
 			fail("tar seek payload");
 	}
+
 	for (unsigned i = 0; i < 4096; i++)
 		while (seen[i]) {
 			struct seen_path *p = seen[i];
+
 			seen[i] = p->next;
 			free(p->path);
 			free(p);
 		}
+
 	/* Permissions follow extraction, so restrictive directories cannot block it. */
 	for (struct dirmode *m = modes; m;) {
 		char *leaf;
 		struct parents chain;
 		int fd = parent(root, m->path, &leaf, &chain);
 		int sub = directory(fd, leaf);
+
 		check(fchmod(sub, m->mode), "layer final directory mode");
 		close(sub);
 		parent_close(&chain);
@@ -466,18 +512,21 @@ static void extract(int root, int tar, int whiteouts)
 		m = next;
 	}
 }
+
 void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 		 const char *diff, unsigned long long *expanded)
 {
 	int tar = openat(stage, "layer.tar",
 			 O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
 			 0600);
+
 	check(tar, "stage layer");
 	EVP_MD_CTX *md = EVP_MD_CTX_new();
 	if (!md || !EVP_DigestInit_ex(md, EVP_sha256(), NULL))
 		fail("digest initialization");
 	if (gzip) {
 		z_stream z;
+
 		memset(&z, 0, sizeof z);
 		if (inflateInit2(&z, 15 + 16) != Z_OK)
 			fail("gzip initialization");
@@ -486,6 +535,7 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 		int status;
 		do {
 			unsigned char out[32768];
+
 			z.next_out = out;
 			z.avail_out = sizeof out;
 			status = inflate(&z, Z_NO_FLUSH);
@@ -512,9 +562,11 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 		if (!EVP_DigestUpdate(md, bytes, size))
 			fail("digest update");
 	}
+
 	unsigned char d[32];
 	unsigned n = 0;
 	char text[72];
+
 	strcpy(text, "sha256:");
 	if (!EVP_DigestFinal_ex(md, d, &n) || n != 32)
 		fail("digest final");
@@ -523,6 +575,7 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 		(void)sprintf(text + 7 + 2 * i, "%02x", d[i]);
 	if (strcmp(text, diff))
 		fail("layer DiffID mismatch");
+
 	extract(root, tar, 1);
 	extract(root, tar, 0);
 	close(tar);

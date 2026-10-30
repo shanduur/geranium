@@ -6,6 +6,7 @@
 int main(int argc, char **argv)
 {
 	char *data = malloc(1024 * 1024 + 1);
+
 	if (!data)
 		return 2;
 	size_t n = fread(data, 1, 1024 * 1024 + 1, stdin);

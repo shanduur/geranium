@@ -8,10 +8,12 @@
 #include <string.h>
 #include <time.h>
 ssize_t __real_read(int, void *, size_t);
+
 ssize_t __wrap_read(int fd, void *buf, size_t size)
 {
 	static int saw_eof, exited;
 	char path[64], target[4096];
+
 	snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
 	ssize_t n = readlink(path, target, sizeof target - 1);
 	int islog = 0, isstatus = 0;
@@ -24,6 +26,7 @@ ssize_t __wrap_read(int fd, void *buf, size_t size)
 		const char msg[] =
 			"INJECT tail read EIO with final log data pending\n";
 		ssize_t ignored = write(2, msg, sizeof msg - 1);
+
 		(void)ignored;
 		errno = EIO;
 		return -1;
@@ -36,12 +39,15 @@ ssize_t __wrap_read(int fd, void *buf, size_t size)
 		for (int i = 0; i < 400; i++) {
 			char state[16] = { 0 };
 			int s = open(target, O_RDONLY);
+
 			if (s >= 0) {
 				ssize_t got =
 					__real_read(s, state, sizeof state);
+
 				close(s);
 				if (got == 7 && !memcmp(state, "exited\n", 7)) {
 					char runtime[4096];
+
 					strcpy(runtime, target);
 					strcpy(runtime + strlen(runtime) - 7,
 					       "/runtime");

@@ -9,6 +9,7 @@
 int main(void)
 {
 	int identity[2], ready[2];
+
 	if (pipe(identity) || pipe(ready))
 		return 1;
 	pid_t caller = fork();
@@ -58,6 +59,7 @@ int main(void)
 	}
 	close(ready[0]);
 	int handle = backend_pidfd_open((int)launcher);
+
 	kill(caller, SIGKILL);
 	waitpid(caller, NULL, 0);
 	if (handle < 0)

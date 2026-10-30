@@ -18,14 +18,17 @@
 #include <string.h>
 #include <openssl/evp.h>
 #include <skalibs/strerr.h>
+
 struct reference {
 	char host[256], repo[256], tag[129], key[65];
 };
+
 static void fail(const char *s)
 {
 	fprintf(stderr, "geranium image: %s\n", s);
 	geranium_fatal_exit(1);
 }
+
 static void platform_error(const char *context, const char *arch)
 {
 	if (!arch)
@@ -34,6 +37,7 @@ static void platform_error(const char *context, const char *arch)
 		arch);
 	geranium_fatal_exit(1);
 }
+
 static void check(int n, const char *s)
 {
 	if (n < 0) {
@@ -41,15 +45,18 @@ static void check(int n, const char *s)
 		geranium_fatal_exit(1);
 	}
 }
+
 static void hash(const void *p, size_t n, char out[65])
 {
 	unsigned char d[32];
 	unsigned len = 0;
+
 	if (!EVP_Digest(p, n, d, &len, EVP_sha256(), NULL) || len != 32)
 		fail("SHA256 failed");
 	for (unsigned i = 0; i < 32; i++)
 		(void)sprintf(out + 2 * i, "%02x", d[i]);
 }
+
 static int digest_ok(const char *s)
 {
 	if (strlen(s) != 71 || strncmp(s, "sha256:", 7))
@@ -59,9 +66,11 @@ static int digest_ok(const char *s)
 			return 0;
 	return 1;
 }
+
 static struct reference reference(const char *input)
 {
 	struct reference r;
+
 	memset(&r, 0, sizeof r);
 	if (!*input || strlen(input) > 500)
 		fail("invalid image reference");
@@ -78,6 +87,7 @@ static struct reference reference(const char *input)
 			fail("invalid image reference");
 	} else {
 		char *colon = strrchr(text, ':'), *slash = strrchr(text, '/');
+
 		if (colon && (!slash || colon > slash)) {
 			*colon++ = 0;
 			suffix = colon;
@@ -87,6 +97,7 @@ static struct reference reference(const char *input)
 		suffix = "latest";
 	if (!*suffix || strlen(suffix) >= sizeof r.tag)
 		fail("invalid image reference");
+
 	if (!digest_ok(suffix)) {
 		if (!((*suffix >= 'a' && *suffix <= 'z') ||
 		      (*suffix >= 'A' && *suffix <= 'Z') ||
@@ -99,8 +110,10 @@ static struct reference reference(const char *input)
 				fail("invalid image reference");
 	}
 	strcpy(r.tag, suffix);
+
 	if (text[0] == '.' || strstr(text, "://"))
 		fail("invalid image reference");
+
 	char *slash = strchr(text, '/'), *repo = text;
 	if (slash && (memchr(text, '.', (size_t)(slash - text)) ||
 		      memchr(text, ':', (size_t)(slash - text)) ||
@@ -116,6 +129,7 @@ static struct reference reference(const char *input)
 		strcpy(r.host, "registry-1.docker.io");
 	if (!*repo || strlen(repo) > 230)
 		fail("invalid image reference");
+
 	for (char *p = repo; *p; p++) {
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
 		      strchr("/._-", *p)))
@@ -128,6 +142,7 @@ static struct reference reference(const char *input)
 	for (char *p = repo; *p;) {
 		char *end = strchr(p, '/');
 		size_t n = end ? (size_t)(end - p) : strlen(p);
+
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')) ||
 		    !((p[n - 1] >= 'a' && p[n - 1] <= 'z') ||
 		      (p[n - 1] >= '0' && p[n - 1] <= '9')))
@@ -135,6 +150,7 @@ static struct reference reference(const char *input)
 		for (size_t k = 0; k < n; k++)
 			if (strchr("._", p[k])) {
 				char separator = p[k];
+
 				if (separator == '_' && k + 1 < n &&
 				    p[k + 1] == '_')
 					k++;
@@ -150,6 +166,7 @@ static struct reference reference(const char *input)
 		strcat(r.repo, repo);
 	} else
 		strcpy(r.repo, repo);
+
 	for (char *p = r.host; *p; p++)
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') ||
 		      strchr(".:-", *p)))
@@ -173,23 +190,28 @@ static struct reference reference(const char *input)
 	for (char *p = hostcopy; *p;) {
 		char *end = strchr(p, '.');
 		size_t n = end ? (size_t)(end - p) : strlen(p);
+
 		if (!n || n > 63 || p[0] == '-' || p[n - 1] == '-' ||
 		    (end && !end[1]))
 			fail("invalid image reference");
 		p = end ? end + 1 : p + n;
 	}
+
 	char normalized[700];
 	int n = snprintf(normalized, sizeof normalized, "%s/%s@%s", r.host,
 			 r.repo, r.tag);
 	hash(normalized, (size_t)n, r.key);
 	return r;
 }
+
 static int dir(int fd, const char *s)
 {
 	int n = openat(fd, s, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
 	check(n, "image directory");
 	return n;
 }
+
 static int store(int state)
 {
 	if (mkdirat(state, ".images", 0700) < 0 && errno != EEXIST)
@@ -201,9 +223,11 @@ static int store(int state)
 		fail("unsafe image store");
 	return fd;
 }
+
 static int lock_image(int fd, const char *key)
 {
 	char name[80];
+
 	(void)snprintf(name, sizeof name, ".lock-%s", key);
 	int lock = openat(
 		fd, name,
@@ -214,17 +238,21 @@ static int lock_image(int fd, const char *key)
 	if (!S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
 	    (st.st_mode & 0077) || st.st_nlink != 1)
 		fail("unsafe image lock");
+
 	struct flock l = { 0 };
 	l.l_type = F_WRLCK;
 	l.l_whence = SEEK_SET;
 	check(fcntl(lock, F_SETLKW, &l), "image lock");
 	return lock;
 }
+
 static void write_all(int fd, const void *data, size_t n)
 {
 	const char *p = data;
+
 	while (n) {
 		ssize_t k = write(fd, p, n);
+
 		if (k <= 0) {
 			if (k < 0 && errno == EINTR)
 				continue;
@@ -234,19 +262,23 @@ static void write_all(int fd, const void *data, size_t n)
 		n -= (size_t)k;
 	}
 }
+
 static void save(int fd, const char *name, const void *data, size_t n)
 {
 	int out = openat(fd, name,
 			 O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
 			 0600);
+
 	check(out, "image metadata");
 	write_all(out, data, n);
 	check(fsync(out), "sync image metadata");
 	check(close(out), "close image metadata");
 }
+
 static void reclaim(int fd, const char *name)
 {
 	struct stat st;
+
 	if (fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
 		if (errno == ENOENT)
 			return;
@@ -261,6 +293,7 @@ static void reclaim(int fd, const char *name)
 	check(unlinkat(fd, name, AT_REMOVEDIR), "image stage removal");
 	check(fsync(fd), "sync image stage removal");
 }
+
 static struct response fetch(const struct reference *r, const char *kind,
 			     const char *id, int local, char **token,
 			     size_t limit)
@@ -268,6 +301,7 @@ static struct response fetch(const struct reference *r, const char *kind,
 	char url[2048];
 	int n = snprintf(url, sizeof url, "%s://%s/v2/%s/%s/%s",
 			 local ? "http" : "https", r->host, r->repo, kind, id);
+
 	if (n < 0 || (size_t)n >= sizeof url)
 		fail("registry URL too long");
 	struct response res = registry_get(url, *token, local, limit);
@@ -284,10 +318,12 @@ static struct response fetch(const struct reference *r, const char *kind,
 	}
 	return res;
 }
+
 static void verify(struct response *res, const char *digest,
 		   unsigned long long size)
 {
 	char got[72];
+
 	strcpy(got, "sha256:");
 	hash(res->data, res->size, got + 7);
 	if (!digest_ok(digest) || strcmp(got, digest) || res->size != size)
@@ -295,6 +331,7 @@ static void verify(struct response *res, const char *digest,
 	if (*res->digest && strcmp(res->digest, got))
 		fail("registry digest header mismatch");
 }
+
 /* Slots are reserved until ordered extraction, including completed workers.
  * Four workers each own at most LAYER_LIMIT+1 response bytes and, during auth
  * refresh, an additional 1 MiB+1 token response. Four LAYER_LIMIT-sized files
@@ -303,11 +340,13 @@ static void verify(struct response *res, const char *digest,
  * so this is not a bound on total staging or RSS. */
 #define PULL_SLOTS 4
 #define LAYER_LIMIT (64 * 1024 * 1024)
+
 struct pull_layer {
 	const char *digest, *diff;
 	size_t size;
 	int gzip;
 };
+
 struct pull_slot {
 	volatile sig_atomic_t pid;
 	int event, file, done;
@@ -322,6 +361,7 @@ static struct sigaction pull_actions[3];
 static void pull_interrupt(int sig)
 {
 	int saved_errno = errno;
+
 	pull_cancel = sig;
 	/* PIDs cannot be recycled until reaped; reaping blocks these signals. */
 	for (unsigned i = 0; i < PULL_SLOTS; i++)
@@ -329,6 +369,7 @@ static void pull_interrupt(int sig)
 			(void)kill((pid_t)pull_slots[i].pid, SIGKILL);
 	errno = saved_errno;
 }
+
 static void pull_cleanup(void)
 {
 	if (!pull_owner || pull_owner != getpid())
@@ -358,9 +399,11 @@ static void pull_cleanup(void)
 		(void)sigaction(pull_signums[i], &pull_actions[i], NULL);
 	(void)sigprocmask(SIG_SETMASK, &pull_mask, NULL);
 }
+
 static void pull_begin(void)
 {
 	static int registered;
+
 	if (!registered) {
 		if (atexit(pull_cleanup))
 			fail("register pull cleanup");
@@ -382,6 +425,7 @@ static void pull_begin(void)
 	      "block pull signals");
 	pull_owner = getpid();
 	geranium_fatal_cleanup(pull_cleanup);
+
 	struct sigaction action;
 	memset(&action, 0, sizeof action);
 	sigemptyset(&action.sa_mask);
@@ -398,28 +442,34 @@ static void pull_begin(void)
 	sigaddset(&running, SIGCHLD);
 	check(sigprocmask(SIG_SETMASK, &running, NULL), "unblock pull signals");
 }
+
 static void pull_cancelled(void)
 {
 	if (pull_cancel) {
 		int sig = pull_cancel;
+
 		pull_cleanup();
 		/* Preserve a caller's disposition and mask when terminating. */
 		(void)raise(sig);
 		geranium_fatal_exit(128 + sig);
 	}
 }
+
 static void layer_progress(unsigned index, unsigned count, const char *verb)
 {
 	char position[16];
+
 	(void)snprintf(position, sizeof position, "%u/%u", index + 1, count);
 	strerr_warnn(4, "geranium: layer ", position, " ", verb);
 }
+
 /* Last registered, first invoked: fatal helpers must not run inherited
  * caller atexit/on_exit callbacks or keep the completion pipe open. */
 static void pull_worker_exit(void)
 {
 	_exit(1);
 }
+
 static void pull_spawn(struct pull_slot *slot, unsigned index, unsigned count,
 		       int stage, const struct reference *r,
 		       const struct pull_layer *layer, int local, char *token)
@@ -480,9 +530,11 @@ static void pull_spawn(struct pull_slot *slot, unsigned index, unsigned count,
 	check(sigprocmask(SIG_SETMASK, &previous, NULL),
 	      "restore worker signals");
 }
+
 static void pull_events(unsigned slots, int wait)
 {
 	struct pollfd events[PULL_SLOTS];
+
 	for (unsigned i = 0; i < slots; i++) {
 		events[i].fd = pull_slots[i].event;
 		events[i].events = POLLIN;
@@ -504,6 +556,7 @@ static void pull_events(unsigned slots, int wait)
 		      "block reap signals");
 		int status;
 		pid_t pid;
+
 		do {
 			pid = waitpid((pid_t)slot->pid, &status, 0);
 		} while (pid < 0 && errno == EINTR);
@@ -519,6 +572,7 @@ static void pull_events(unsigned slots, int wait)
 			fail("layer worker failed");
 	}
 }
+
 static void pull_layers(int root, int stage, const struct reference *r,
 			struct pull_layer *layers, unsigned count, int local,
 			char **token)
@@ -526,6 +580,7 @@ static void pull_layers(int root, int stage, const struct reference *r,
 	unsigned long long expanded = 0;
 	long cpus = backend_pull_cpus();
 	struct sigaction children;
+
 	check(sigaction(SIGCHLD, NULL, &children), "read pull child action");
 	/* Auto-reaping cannot safely coexist with owned waitpid/PID lifetimes.
 	 * Serial acquisition preserves the caller's action and notifications. */
@@ -561,10 +616,12 @@ static void pull_layers(int root, int stage, const struct reference *r,
 	}
 	for (unsigned i = 0; i < count; i++) {
 		struct pull_slot *slot = &pull_slots[i % slots];
+
 		/* Observe every completion, never just the next manifest-order PID. */
 		pull_events(slots, 0);
 		while (!slot->done)
 			pull_events(slots, 1);
+
 		struct stat st;
 		check(fstat(slot->file, &st), "downloaded layer stat");
 		if (!S_ISREG(st.st_mode) || st.st_size < 1 ||
@@ -593,13 +650,16 @@ static void pull_layers(int root, int stage, const struct reference *r,
 	pull_cleanup();
 	pull_cancelled();
 }
+
 static int media(const char *s, const char *oci, const char *docker)
 {
 	return !strcmp(s, oci) || !strcmp(s, docker);
 }
+
 static const char *response_type(struct response *r, yyjson_val *j)
 {
 	size_t n = strcspn(r->type, ";");
+
 	while (n && (r->type[n - 1] == ' ' || r->type[n - 1] == '\t'))
 		n--;
 	r->type[n] = 0;
@@ -614,6 +674,7 @@ static const char *response_type(struct response *r, yyjson_val *j)
 		fail("HTTP manifest Content-Type mismatch");
 	return type;
 }
+
 static void manifest_type(yyjson_val *j, const char *type)
 {
 	if (json_uint(json_get(j, "schemaVersion")) != 2 ||
@@ -621,6 +682,7 @@ static void manifest_type(yyjson_val *j, const char *type)
 		   "application/vnd.docker.distribution.manifest.v2+json"))
 		fail("unsupported image manifest mediaType/schema");
 }
+
 static void config_parse(yyjson_val *j, struct image_config *c)
 {
 	memset(c, 0, sizeof *c);
@@ -636,10 +698,12 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 	yyjson_val *user = json_get(config, "User");
 	if (user && !yyjson_is_null(user)) {
 		const char *s = json_string(user);
+
 		if (*s && strcmp(s, "0") && strcmp(s, "root") &&
 		    strcmp(s, "0:0") && strcmp(s, "root:root"))
 			fail("non-root image User unsupported");
 	}
+
 	yyjson_val *wd = json_get(config, "WorkingDir");
 	const char *work = wd && !yyjson_is_null(wd) ? json_string(wd) : "/";
 	if (!*work)
@@ -647,6 +711,7 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 	if (*work != '/' || strlen(work) >= sizeof c->workdir)
 		fail("invalid image WorkingDir");
 	strcpy(c->workdir, work);
+
 	yyjson_val *lists[2] = { json_get(config, "Entrypoint"),
 				 json_get(config, "Cmd") };
 	size_t bytes = 0;
@@ -661,6 +726,7 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 			{
 				const char *s = json_string(q);
 				size_t n = strlen(s) + 1;
+
 				if (count == IMAGE_ARGS ||
 				    bytes + n > IMAGE_BYTES)
 					fail("image command too large");
@@ -669,6 +735,7 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 				bytes += n;
 			}
 		}
+
 	yyjson_val *env = json_get(config, "Env");
 	bytes = 0;
 	count = 0;
@@ -680,6 +747,7 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 		yyjson_arr_foreach(env, index, length, q)
 		{
 			const char *s = json_string(q), *eq = strchr(s, '=');
+
 			if (!eq || eq == s)
 				fail("invalid image environment");
 			for (const char *p = s; p < eq; p++)
@@ -700,12 +768,15 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 		}
 	}
 }
+
 static int config_read(int, const char *, struct image_config *, int);
+
 int image_pull(int state, const char *input, int local_http)
 {
 	struct reference r = reference(input);
 	int fd = store(state), lock = lock_image(fd, r.key);
 	char pending[80];
+
 	(void)snprintf(pending, sizeof pending, ".pending-%s", r.key);
 	reclaim(fd, pending);
 	struct stat st;
@@ -736,6 +807,7 @@ int image_pull(int state, const char *input, int local_http)
 		strerr_warnn(2, "geranium: ", "already present");
 		return 0;
 	}
+
 	if (errno != ENOENT)
 		check(-1, "image existence");
 	check(mkdirat(fd, pending, 0700), "image stage");
@@ -743,6 +815,7 @@ int image_pull(int state, const char *input, int local_http)
 	check(mkdirat(stage, "rootfs", 0700), "image rootfs");
 	int root = dir(stage, "rootfs");
 	char *token = NULL;
+
 	strerr_warnn(2, "geranium: ", "fetching manifest");
 	struct response res =
 		fetch(&r, "manifests", r.tag, local_http, &token, 1024 * 1024);
@@ -768,6 +841,7 @@ int image_pull(int state, const char *input, int local_http)
 		yyjson_arr_foreach(list, index, length, d)
 		{
 			yyjson_val *p = json_get(d, "platform");
+
 			if (!p)
 				continue;
 			if (!strcmp(json_string(json_get(p, "os")), "linux") &&
@@ -775,6 +849,7 @@ int image_pull(int state, const char *input, int local_http)
 				    arch)) {
 				yyjson_val *v = json_get(p, "variant");
 				const char *variant = v ? json_string(v) : "";
+
 				if (*variant && (strcmp(arch, "arm64") ||
 						 strcmp(variant, "v8")))
 					continue;
@@ -819,6 +894,7 @@ int image_pull(int state, const char *input, int local_http)
 		   "application/vnd.oci.image.config.v1+json",
 		   "application/vnd.docker.container.image.v1+json"))
 		fail("unsupported config descriptor");
+
 	strerr_warnn(2, "geranium: ", "fetching config");
 	struct response conf =
 		fetch(&r, "blobs", dg, local_http, &token, 1024 * 1024);
@@ -827,6 +903,7 @@ int image_pull(int state, const char *input, int local_http)
 	yyjson_val *cj = yyjson_doc_get_root(config_doc);
 	struct image_config parsed;
 	config_parse(cj, &parsed);
+
 	yyjson_val *rf = json_get(cj, "rootfs");
 	if (strcmp(json_string(json_get(rf, "type")), "layers"))
 		fail("unsupported rootfs type");
@@ -835,14 +912,17 @@ int image_pull(int state, const char *input, int local_http)
 	if (!diffs || !yyjson_is_arr(diffs) || !layers ||
 	    !yyjson_is_arr(layers))
 		fail("invalid image layers");
+
 	yyjson_arr_iter diff_iter = yyjson_arr_iter_with(diffs);
 	unsigned count = 0;
 	struct pull_layer validated[128];
 	size_t index, length;
 	yyjson_val *layer;
+
 	yyjson_arr_foreach(layers, index, length, layer)
 	{
 		yyjson_val *diff = yyjson_arr_iter_next(&diff_iter);
+
 		if (++count > 128 || !diff)
 			fail("excessive layers or DiffID count mismatch");
 		dg = json_string(json_get(layer, "digest"));
@@ -867,16 +947,19 @@ int image_pull(int state, const char *input, int local_http)
 	}
 	if (yyjson_arr_iter_has_next(&diff_iter))
 		fail("DiffID count mismatch");
+
 	pull_layers(root, stage, &r, validated, count, local_http, &token);
 	check(fchmod(root, (mode_t)layer_root_mode()),
 	      "image root permissions");
 	close(root);
+
 	save(stage, "config.json", conf.data, conf.size);
 	save(stage, "manifest.json", res.data, res.size);
 	save(stage, "reference", input, strlen(input));
 	check(fsync(stage), "sync staged image");
 	check(renameat(fd, pending, fd, r.key), "publish image");
 	check(fsync(fd), "sync image publication");
+
 	yyjson_doc_free(config_doc);
 	yyjson_doc_free(doc);
 	free(conf.data);
@@ -888,12 +971,15 @@ int image_pull(int state, const char *input, int local_http)
 	strerr_warnn(2, "geranium: ", "pulled");
 	return 0;
 }
+
 int image_remove(int state, const char *input)
 {
 	struct reference r = reference(input);
 	int fd = store(state), lock = lock_image(fd, r.key);
 	char pending[80];
+
 	(void)snprintf(pending, sizeof pending, ".pending-%s", r.key);
+
 	struct stat published, staged;
 	int exists = fstatat(fd, r.key, &published, AT_SYMLINK_NOFOLLOW) == 0;
 	if (!exists && errno != ENOENT)
@@ -924,6 +1010,7 @@ static int config_read(int fd, const char *name, struct image_config *c,
 {
 	int in = openat(fd, name,
 			O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+
 	if (in < 0 && optional && errno == ENOENT)
 		return 0;
 	check(in, "image configuration");
@@ -933,6 +1020,7 @@ static int config_read(int fd, const char *name, struct image_config *c,
 	    st.st_uid != geteuid() || st.st_size < 1 ||
 	    st.st_size > 1024 * 1024)
 		fail("invalid saved image configuration");
+
 	size_t size = (size_t)st.st_size;
 	unsigned char *data = malloc(size + 1);
 	if (!data)
@@ -940,6 +1028,7 @@ static int config_read(int fd, const char *name, struct image_config *c,
 	size_t offset = 0;
 	while (offset < size) {
 		ssize_t n = read(in, data + offset, size - offset);
+
 		if (n <= 0)
 			fail("read image config");
 		offset += (size_t)n;
@@ -953,10 +1042,12 @@ static int config_read(int fd, const char *name, struct image_config *c,
 	c->size = (unsigned long)size;
 	return 1;
 }
+
 int image_open(int state, const char *input, int *lock, struct image_config *c)
 {
 	struct reference r = reference(input);
 	int fd = store(state);
+
 	*lock = lock_image(fd, r.key);
 	int image = openat(fd, r.key,
 			   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -971,6 +1062,7 @@ int image_open(int state, const char *input, int *lock, struct image_config *c)
 	check(fstat(image, &st), "image stat");
 	if (st.st_uid != geteuid() || (st.st_mode & 0077))
 		fail("unsafe published image");
+
 	(void)config_read(image, "config.json", c, 0);
 	int root = openat(image, "rootfs",
 			  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -983,10 +1075,12 @@ int image_open(int state, const char *input, int *lock, struct image_config *c)
 	close(fd);
 	return root;
 }
+
 void image_config_save(int container, const struct image_config *c)
 {
 	save(container, "image.json", c->source, (size_t)c->size);
 }
+
 int image_config_load(int container, struct image_config *c)
 {
 	return config_read(container, "image.json", c, 1);

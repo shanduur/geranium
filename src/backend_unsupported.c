@@ -1,32 +1,38 @@
 #include "backend.h"
 #include <errno.h>
+
 long backend_pull_cpus(void)
 {
 	/* Without a kernel parent-death contract, never orphan fetch helpers. */
 	return 0;
 }
+
 int backend_supported(void)
 {
 	return 0;
 }
+
 int backend_watch_parent(int parent_pid)
 {
 	(void)parent_pid;
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_enter(const char *rootfs)
 {
 	(void)rootfs;
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_pidfd_open(int pid)
 {
 	(void)pid;
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_signal(int fd, int sig)
 {
 	(void)fd;
@@ -34,6 +40,7 @@ int backend_signal(int fd, int sig)
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_close_inherited(const int *keep, unsigned count)
 {
 	(void)keep;
@@ -41,11 +48,13 @@ int backend_close_inherited(const int *keep, unsigned count)
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_exec_prepare(void)
 {
 	errno = ENOSYS;
 	return -1;
 }
+
 int backend_exec_wait(int child, int *status, int owner, int ack,
 		      long long deadline, const volatile sig_atomic_t *cancel)
 {

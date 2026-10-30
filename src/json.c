@@ -31,11 +31,13 @@ static void validate(yyjson_val *value, unsigned depth, unsigned *nodes)
 	} else if (yyjson_is_arr(value)) {
 		size_t index, count;
 		yyjson_val *child;
+
 		yyjson_arr_foreach(value, index, count, child)
 			validate(child, depth + 1, nodes);
 	} else if (yyjson_is_obj(value)) {
 		size_t index, count;
 		yyjson_val *key, *child;
+
 		yyjson_obj_foreach(value, index, count, key, child)
 		{
 			string_check(key);
@@ -53,10 +55,12 @@ yyjson_doc *json_parse(const void *data, size_t n)
 {
 	if (n > 1024 * 1024)
 		error();
+
 	/* Raw numbers preserve the original decimal lexeme without rounding. */
 	yyjson_doc *doc = yyjson_read(data, n, YYJSON_READ_NUMBER_AS_RAW);
 	if (!doc)
 		error();
+
 	unsigned nodes = 0;
 	validate(yyjson_doc_get_root(doc), 0, &nodes);
 	return doc;
@@ -79,11 +83,13 @@ const char *json_string(yyjson_val *value)
 unsigned long long json_uint(yyjson_val *value)
 {
 	const char *raw = yyjson_get_raw(value);
+
 	if (!raw || !*raw)
 		error();
 	for (const char *p = raw; *p; p++)
 		if (*p < '0' || *p > '9')
 			error();
+
 	errno = 0;
 	unsigned long long result = strtoull(raw, NULL, 10);
 	if (errno)

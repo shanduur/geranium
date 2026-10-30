@@ -14,19 +14,23 @@
 static long long now(void)
 {
 	struct timespec t;
+
 	if (clock_gettime(CLOCK_MONOTONIC, &t))
 		exit(1);
 	return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
+
 static int owner(int fd)
 {
 	struct flock l = { 0 };
+
 	l.l_type = F_WRLCK;
 	l.l_whence = SEEK_SET;
 	if (fcntl(fd, F_GETLK, &l))
 		exit(1);
 	return l.l_type == F_UNLCK ? 0 : (int)l.l_pid;
 }
+
 int main(int argc, char **argv)
 {
 	if (argc != 5)
@@ -60,8 +64,10 @@ int main(int argc, char **argv)
 	char path[4096];
 	snprintf(path, sizeof path, "%s/%s/log", argv[2], argv[4]);
 	int marked = 0;
+
 	while (now() - start < 3000) {
 		FILE *f = fopen(path, "r");
+
 		if (f) {
 			if (fgets(buf, sizeof buf, f) &&
 			    strstr(buf, "PREEXEC_DELAY"))
@@ -72,6 +78,7 @@ int main(int argc, char **argv)
 			break;
 		poll(NULL, 0, 20);
 	}
+
 	snprintf(path, sizeof path, "%s/%s/runtime", argv[2], argv[4]);
 	int lock = open(path, O_RDWR);
 	if (lock < 0)
@@ -89,6 +96,7 @@ int main(int argc, char **argv)
 	long long limit = now() + (timeout ? 11500 : 3000);
 	int reaped = 0;
 	struct pollfd event = { .fd = handle, .events = POLLIN };
+
 	while (now() < limit) {
 		if (!reaped && waitpid(client, &status, WNOHANG) == client)
 			reaped = 1;
@@ -116,6 +124,7 @@ int main(int argc, char **argv)
 		close(marker[0]);
 		return 1;
 	}
+
 	snprintf(path, sizeof path, "%s/%s/status", argv[2], argv[4]);
 	FILE *f = fopen(path, "r");
 	if (!f || !fgets(buf, sizeof buf, f))

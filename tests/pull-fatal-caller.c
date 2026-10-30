@@ -11,6 +11,7 @@ static int blocking;
 static void callback(void)
 {
 	char byte;
+
 	/* Simulate an embedding caller closing every descriptor it owns,
 	 * including the image lock, before entering a blocking callback. */
 	for (int fd = 3; fd < 1024; fd++)
@@ -30,6 +31,7 @@ static void callback(void)
 static void first_callback(void)
 {
 	int saved = blocking;
+
 	blocking = 0;
 	callback();
 	blocking = saved;

@@ -5,6 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 int __real_backend_signal(int handle, int signum);
+
 int __wrap_backend_signal(int handle, int signum)
 {
 #ifdef KILL_RACE
@@ -14,6 +15,7 @@ int __wrap_backend_signal(int handle, int signum)
 #else
 	const int trigger = SIGTERM;
 #endif
+
 	if (signum == trigger) {
 		if (__real_backend_signal(handle, SIGKILL) < 0)
 			return -1;
@@ -47,6 +49,7 @@ int __wrap_backend_signal(int handle, int signum)
 #else
 		const char marker[] = "wrapped TERM observed ESRCH\n";
 #endif
+
 		if (write(2, marker, sizeof marker - 1) !=
 		    (ssize_t)(sizeof marker - 1))
 			_exit(98);

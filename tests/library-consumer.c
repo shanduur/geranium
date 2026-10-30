@@ -9,8 +9,10 @@ int main(int argc, char **argv)
 		return 99;
 	const char *root = argv[2];
 	const char *command[] = { "/bin/true" };
+
 	if (!strcmp(argv[1], "prepare-root")) {
 		int fd = geranium_open_state_root(root);
+
 		return close(fd) < 0;
 	}
 	if (!strcmp(argv[1], "null-prepare-root"))
@@ -42,6 +44,7 @@ int main(int argc, char **argv)
 				       "consumer", 1, NULL);
 	if (!strcmp(argv[1], "null-element")) {
 		const char *null_command[] = { NULL };
+
 		return geranium_create(root, GERANIUM_SOURCE_ROOTFS, root,
 				       "consumer", 1, null_command);
 	}

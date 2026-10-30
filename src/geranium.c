@@ -22,6 +22,7 @@
 #define MAX_ARGS GERANIUM_COMMAND_ARGS_MAX
 #define MAX_BYTES GERANIUM_COMMAND_BYTES_MAX
 static int manager_diagnostic;
+
 static void die(const char *s)
 {
 	if (manager_diagnostic) {
@@ -30,6 +31,7 @@ static void die(const char *s)
 		int n = snprintf(buffer, sizeof buffer, "%s: %s", s,
 				 strerror(errno));
 		size_t size = n < 0 ? 0 : (size_t)n;
+
 		if (size >= sizeof buffer)
 			size = sizeof buffer - 1;
 		buffer[size++] = '\n';
@@ -40,24 +42,29 @@ static void die(const char *s)
 	perror(s);
 	geranium_fatal_exit(1);
 }
+
 static void bad(const char *s)
 {
 	fprintf(stderr, "geranium: %s\n", s);
 	geranium_fatal_exit(1);
 }
+
 static void must(int v, const char *s)
 {
 	if (v < 0)
 		die(s);
 }
+
 static int directory(int fd, const char *name)
 {
 	return openat(fd, name,
 		      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 }
+
 static int name_ok(const char *s)
 {
 	size_t n = strlen(s);
+
 	if (!n || n > 63 || s[0] == '.' || s[0] == '-')
 		return 0;
 	for (; *s; s++)
@@ -66,17 +73,20 @@ static int name_ok(const char *s)
 			return 0;
 	return 1;
 }
+
 /* Traverse every component with O_NOFOLLOW; never follow an ancestor symlink. */
 static int path_dir(const char *path, int create)
 {
 	if (path[0] != '/')
 		bad("paths must be absolute");
+
 	int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC), next;
 	if (fd < 0)
 		die("open /");
 	char *copy = strdup(path), *p = copy;
 	if (!copy)
 		die("strdup");
+
 	while (*p) {
 		while (*p == '/')
 			p++;
@@ -91,6 +101,7 @@ static int path_dir(const char *path, int create)
 			bad("dot path components forbidden");
 		if (create && mkdirat(fd, p, 0700) < 0 && errno != EEXIST)
 			die("mkdir state");
+
 		next = directory(fd, p);
 		if (next < 0)
 			die("open path component (no symlinks)");
@@ -102,10 +113,12 @@ static int path_dir(const char *path, int create)
 	free(copy);
 	return fd;
 }
+
 /* Compare inode identities while walking state upwards; lexical prefixes are insufficient. */
 static int ancestor_of(int source, int state)
 {
 	struct stat src, at, parent;
+
 	if (fstat(source, &src) < 0)
 		die("stat source");
 	int cur = dup(state);
@@ -127,18 +140,21 @@ static int ancestor_of(int source, int state)
 			close(up);
 			break;
 		}
+
 		close(cur);
 		cur = up;
 	}
 	close(cur);
 	return 0;
 }
+
 static void copy_identity(const struct stat *st, int image)
 {
 	if (st->st_uid != geteuid() || st->st_gid != getegid() ||
 	    (!image && st->st_nlink > 1) || (st->st_mode & 07000))
 		bad("unsupported rootfs ownership, hardlink, or special mode");
 }
+
 struct copy_link {
 	dev_t dev;
 	ino_t ino;
@@ -147,11 +163,13 @@ struct copy_link {
 };
 static struct copy_link *copy_links[4096];
 static size_t copy_link_bytes;
+
 static unsigned link_bucket(dev_t dev, ino_t ino)
 {
 	return (unsigned)(((unsigned long long)dev ^ (unsigned long long)ino) %
 			  4096);
 }
+
 static void copytree(int src, int dst, unsigned depth, unsigned *count,
 		     int image, int destination_root, const char *prefix)
 {
@@ -173,6 +191,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 			continue;
 		if (++*count > 100000)
 			bad("rootfs too many entries");
+
 		struct stat st;
 		if (fstatat(src, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0)
 			die("stat rootfs");
@@ -180,6 +199,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 		    (st.st_mode &
 		     (image && S_ISDIR(st.st_mode) ? 06000 : 07000)))
 			bad("unsupported rootfs identity or special mode");
+
 		if (S_ISDIR(st.st_mode)) {
 			must(mkdirat(dst, ent->d_name, 0700),
 			     "mkdir copied directory");
@@ -219,10 +239,12 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 			copy_identity(&actual, image);
 			if (actual.st_size > 1024LL * 1024 * 1024)
 				bad("file larger than 1 GiB");
+
 			unsigned bucket =
 				link_bucket(actual.st_dev, actual.st_ino);
 			if (image && actual.st_nlink > 1) {
 				struct copy_link *known = copy_links[bucket];
+
 				while (known && (known->dev != actual.st_dev ||
 						 known->ino != actual.st_ino))
 					known = known->next;
@@ -263,6 +285,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 			char buf[32768];
 			ssize_t n;
 			unsigned long long total = 0;
+
 			while ((n = read(a, buf, sizeof buf)) > 0) {
 				total += (unsigned long long)n;
 				if (total > 1024ULL * 1024 * 1024)
@@ -271,6 +294,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 				while (off < n) {
 					ssize_t k = write(b, buf + off,
 							  (size_t)(n - off));
+
 					if (k < 0)
 						die("copy write");
 					off += k;
@@ -278,6 +302,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 			}
 			if (n < 0)
 				die("copy read");
+
 			must(fchmod(b, st.st_mode & 0777), "chmod file");
 			must(close(a), "close copied source");
 			must(close(b), "close copied file");
@@ -285,6 +310,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 			char target[PATH_MAX];
 			ssize_t n = readlinkat(src, ent->d_name, target,
 					       sizeof target - 1);
+
 			if (n < 0 || n == (ssize_t)sizeof target - 1)
 				bad("invalid rootfs symlink");
 			target[n] = 0;
@@ -295,6 +321,7 @@ static void copytree(int src, int dst, unsigned depth, unsigned *count,
 	}
 	must(closedir(dir), "close directory enumeration");
 }
+
 static void remove_tree(int fd)
 {
 	must(fchmod(fd, 0700), "chmod removable directory");
@@ -312,6 +339,7 @@ static void remove_tree(int fd)
 		}
 		if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
 			continue;
+
 		struct stat st;
 		if (fstatat(fd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0)
 			die("stat remove");
@@ -329,21 +357,26 @@ static void remove_tree(int fd)
 	}
 	must(closedir(dir), "close directory enumeration");
 }
+
 static void write_all(int fd, const void *p, size_t n)
 {
 	const char *s = p;
+
 	while (n) {
 		ssize_t k = write(fd, s, n);
+
 		if (k < 0)
 			die("write");
 		s += k;
 		n -= (size_t)k;
 	}
 }
+
 static int file(int dir, const char *name, int flags, mode_t mode)
 {
 	return openat(dir, name, flags | O_CLOEXEC | O_NOFOLLOW, mode);
 }
+
 static int status_replace(int dir, const char *status)
 {
 	if (unlinkat(dir, "status.tmp", 0) < 0 && errno != ENOENT)
@@ -354,6 +387,7 @@ static int status_replace(int dir, const char *status)
 	write_all(fd, status, strlen(status));
 	if (fsync(fd) < 0) {
 		int error = errno;
+
 		(void)close(fd);
 		errno = error;
 		return -1;
@@ -364,10 +398,12 @@ static int status_replace(int dir, const char *status)
 		return -1;
 	return fsync(dir);
 }
+
 static void status_write(int dir, const char *status)
 {
 	if (status_replace(dir, status) < 0) {
 		int error = errno;
+
 		/* Init still owns runtime: no client may accept a result until this
          * error cleanup finishes and the process releases its lease. */
 		if (manager_diagnostic && !strcmp(status, "exited\n")) {
@@ -378,9 +414,11 @@ static void status_write(int dir, const char *status)
 		die("publish status");
 	}
 }
+
 static void status_read(int dir, char *out, size_t cap)
 {
 	int fd = file(dir, "status", O_RDONLY, 0);
+
 	if (fd < 0)
 		die("read status");
 	ssize_t n = read(fd, out, cap - 1);
@@ -389,12 +427,14 @@ static void status_read(int dir, char *out, size_t cap)
 	out[n] = 0;
 	must(close(fd), "close status read");
 }
+
 /* Stable name identity across staging, removal and recreation. Anchors are
  * retained: unlinking one could split waiters and new commands across inodes.
  * The caller validates the private state root and the name before opening it. */
 static int command_lock(int root, const char *name)
 {
 	char anchor[96];
+
 	if (snprintf(anchor, sizeof anchor, ".command-%s.lock", name) >=
 	    (int)sizeof anchor)
 		bad("name too long");
@@ -407,29 +447,36 @@ static int command_lock(int root, const char *name)
 	if (!S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
 	    (st.st_mode & 0077) || st.st_nlink != 1)
 		bad("command lock must be a private owned regular file with one link");
+
 	struct flock lock = { 0 };
 	lock.l_type = F_WRLCK;
 	lock.l_whence = SEEK_SET;
 	must(fcntl(fd, F_SETLKW, &lock), "command lock");
 	return fd;
 }
+
 #define LOG_LIMIT (1024U * 1024U)
+
 static long long monotonic_ms(void)
 {
 	struct timespec now;
+
 	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
 		die("clock");
 	return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
+
 static int outcome(int status)
 {
 	return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }
+
 static void code_write(int dir, int code)
 {
 	char text[16];
 	int n = snprintf(text, sizeof text, "%d\n", code);
 	int fd = file(dir, "exitcode.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
 	if (fd < 0)
 		die("exitcode tmp");
 	write_all(fd, text, (size_t)n);
@@ -438,10 +485,12 @@ static void code_write(int dir, int code)
 	must(renameat(dir, "exitcode.tmp", dir, "exitcode"),
 	     "publish exitcode");
 }
+
 static int code_read(int dir)
 {
 	char text[16] = { 0 };
 	int fd = file(dir, "exitcode", O_RDONLY, 0);
+
 	if (fd < 0)
 		die("exitcode");
 	ssize_t n = read(fd, text, sizeof text - 1);
@@ -456,35 +505,43 @@ static int code_read(int dir)
 		bad("invalid exitcode");
 	return (int)code;
 }
+
 /* The runtime lock is owned only by namespace init. */
 static int runtime_open(int container)
 {
 	int fd = file(container, "runtime", O_RDWR | O_CREAT, 0600);
+
 	if (fd < 0)
 		die("runtime lock");
 	return fd;
 }
+
 static int runtime_pid(int fd)
 {
 	struct flock l = { 0 };
+
 	l.l_type = F_WRLCK;
 	l.l_whence = SEEK_SET;
 	must(fcntl(fd, F_GETLK, &l), "runtime identity");
 	return l.l_type == F_UNLCK ? 0 : (int)l.l_pid;
 }
+
 static int attachment_open(int container)
 {
 	int fd = file(container, "attachment", O_RDWR | O_CREAT, 0600);
+
 	if (fd < 0)
 		die("foreground attachment");
 	return fd;
 }
+
 /* Private stages may be incomplete: never require status to reclaim them.
  * The name lock excludes all cooperating starters; retain the original runtime
  * and attachment inode checks before deleting any stage contents. */
 static void reclaim_stage(int state, const char *name)
 {
 	struct stat st;
+
 	if (fstatat(state, name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
 		if (errno == ENOENT)
 			return;
@@ -505,6 +562,7 @@ static void reclaim_stage(int state, const char *name)
 		bad("pending stage runtime is still owned");
 	if (runtime_pid(attachment))
 		bad("pending stage foreground client is still attached");
+
 	must(close(runtime), "close stage runtime");
 	must(close(attachment), "close stage attachment");
 	remove_tree(stage);
@@ -512,6 +570,7 @@ static void reclaim_stage(int state, const char *name)
 	must(unlinkat(state, name, AT_REMOVEDIR), "remove pending stage");
 	must(fsync(state), "sync removed stage");
 }
+
 static void refresh(int container, char *status, size_t size)
 {
 	status_read(container, status, size);
@@ -532,19 +591,24 @@ static void refresh(int container, char *status, size_t size)
 		}
 	}
 }
+
 static volatile sig_atomic_t pending;
+
 static void signal_pending(int sig)
 {
 	pending = sig;
 }
+
 static void namespace_init(int container, char **args, int log, int ack,
 			   int owner, struct image_config *image)
 {
 	int runtime = runtime_open(container);
 	struct flock l = { 0 };
+
 	l.l_type = F_WRLCK;
 	l.l_whence = SEEK_SET;
 	must(fcntl(runtime, F_SETLK, &l), "own runtime");
+
 	struct sigaction sa = { 0 };
 	sa.sa_handler = signal_pending;
 	sigemptyset(&sa.sa_mask);
@@ -557,6 +621,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 	sigset_t unblocked;
 	sigemptyset(&unblocked);
 	must(sigprocmask(SIG_SETMASK, &unblocked, NULL), "init signal mask");
+
 	int output[2], execack[2];
 	must(pipe(output), "output");
 	must(pipe(execack), "exec ack");
@@ -564,6 +629,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 	must(fcntl(execack[0], F_SETFD, FD_CLOEXEC), "exec read cloexec");
 	must(fcntl(output[0], F_SETFD, FD_CLOEXEC), "output read cloexec");
 	must(fcntl(output[1], F_SETFD, FD_CLOEXEC), "output write cloexec");
+
 	pid_t child = fork();
 	if (child < 0)
 		die("fork payload");
@@ -587,6 +653,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 		close(ack);
 		if (owner >= 0)
 			close(owner);
+
 		char *legacy_env[] = { "PATH=/bin:/usr/bin", NULL };
 		char **env = image ? image->env : legacy_env;
 		if (image && chdir(image->workdir) < 0) {
@@ -599,6 +666,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 			execve(args[0], args, env);
 		else {
 			const char *path = NULL;
+
 			for (unsigned i = 0; env[i]; i++)
 				if (!strncmp(env[i], "PATH=", 5))
 					path = env[i] + 5;
@@ -606,6 +674,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 				errno = ENOENT;
 			else {
 				char paths[IMAGE_BYTES];
+
 				if (strlen(path) >= sizeof paths)
 					bad("image PATH too large");
 				strcpy(paths, path);
@@ -613,6 +682,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 				char *p = paths;
 				for (;;) {
 					char *end = strchr(p, ':');
+
 					if (end)
 						*end = 0;
 					const char *prefix = *p ? p : ".";
@@ -639,6 +709,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 				}
 			}
 		}
+
 		int code = errno == ENOENT ? 127 : errno == EACCES ? 126 : 125;
 		perror(args[0]);
 		write_all(execack[1], &code, sizeof code);
@@ -646,6 +717,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 	}
 	close(output[1]);
 	close(execack[1]);
+
 	int status = 0, finished = 0;
 	int ready = backend_exec_wait((int)child, &status, owner, ack,
 				      monotonic_ms() + 8000, &pending);
@@ -665,33 +737,40 @@ static void namespace_init(int container, char **args, int log, int ack,
 	}
 	if (ready != 1)
 		finished = 1;
+
 	int code = 0;
 	ssize_t n;
+
 	do {
 		n = read(execack[0], &code, sizeof code);
 	} while (n < 0 && errno == EINTR);
 	close(execack[0]);
 	if (n != 0 && n != (ssize_t)sizeof code)
 		code = 125;
+
 	if (ready != 1 && !code)
 		code = ready < 0 ? 125 : outcome(status);
 	if (ready != 1 && !code)
 		code = 125; /* Even a clean pre-exec exit is failure. */
 	if (!code)
 		status_write(container, "running\n");
+
 	unsigned char reply = (unsigned char)code;
 	if (!code) {
 		write_all(ack, &reply, 1);
 		close(ack);
 	}
+
 	must(fcntl(output[0], F_SETFL, O_NONBLOCK), "output nonblocking");
 	size_t logged = 0;
 	int eof = 0;
 	long long deadline = 0;
+
 	for (;;) {
 		struct pollfd fds[2] = { { .fd = eof ? -1 : output[0],
 					   .events = POLLIN | POLLHUP },
 					 { .fd = owner, .events = POLLHUP } };
+
 		if (poll(fds, 2, 20) < 0 && errno != EINTR)
 			die("init poll");
 		if (fds[1].revents & POLLHUP) {
@@ -708,8 +787,10 @@ static void namespace_init(int container, char **args, int log, int ack,
 			(void)kill(-1, SIGKILL);
 			deadline = 0;
 		}
+
 		if (!finished) {
 			pid_t got;
+
 			while ((got = waitpid(-1, &status, WNOHANG)) > 0)
 				if (got == child) {
 					finished = 1;
@@ -721,12 +802,14 @@ static void namespace_init(int container, char **args, int log, int ack,
 		if (!eof)
 			for (int tick = 0; tick < 8; tick++) {
 				char buf[8192];
+
 				n = read(output[0], buf, sizeof buf);
 				if (n > 0) {
 					size_t room = LOG_LIMIT - logged,
 					       keep = (size_t)n < room ?
 							      (size_t)n :
 							      room;
+
 					if (keep) {
 						write_all(log, buf, keep);
 						logged += keep;
@@ -744,6 +827,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 			break;
 	}
 	must(close(log), "close completed log");
+
 	code_write(container, outcome(status));
 	status_write(container, "exited\n");
 	/* Keep runtime owned until all publication and reply operations finish. */
@@ -751,6 +835,7 @@ static void namespace_init(int container, char **args, int log, int ack,
 		/* A cancelled caller has no reader. Failure is already published and
          * runtime ownership retained until exit; EPIPE is expected abandonment. */
 		ssize_t sent;
+
 		do {
 			sent = write(ack, &reply, 1);
 		} while (sent < 0 && errno == EINTR);
@@ -760,15 +845,19 @@ static void namespace_init(int container, char **args, int log, int ack,
 	}
 	_exit(0);
 }
+
 static int follow(int container, int owner, int state, const char *name)
 {
 	int log = file(container, "log", O_RDONLY, 0);
+
 	if (log < 0)
 		die("open log");
 	int runtime = runtime_open(container);
+
 	for (;;) {
 		char buffer[4096];
 		ssize_t n = read(log, buffer, sizeof buffer);
+
 		if (n < 0)
 			die("read log");
 		if (n > 0) {
@@ -792,6 +881,7 @@ static int follow(int container, int owner, int state, const char *name)
 	}
 	must(close(runtime), "close follow runtime");
 	must(close(log), "close follow log");
+
 	/* Attachment fences this generation. Take the same name lock as inspect
      * and stop only after draining output, so backpressure holds no name lock. */
 	int lock = command_lock(state, name);
@@ -811,11 +901,13 @@ static int follow(int container, int owner, int state, const char *name)
 	must(close(owner), "close owner");
 	return result;
 }
+
 static int start(int container, const char *rootfs, int detached, int *lockfd,
 		 int statefd, const char *name)
 {
 	if (!backend_supported())
 		bad("isolation unsupported on this platform");
+
 	int occupied = runtime_open(container);
 	if (runtime_pid(occupied))
 		bad("container runtime is still owned");
@@ -825,6 +917,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 		bad("previous foreground client is still attached");
 	if (!detached) {
 		struct flock l = { 0 };
+
 		l.l_type = F_WRLCK;
 		l.l_whence = SEEK_SET;
 		must(fcntl(attachment, F_SETLK, &l),
@@ -834,6 +927,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	refresh(container, state, sizeof state);
 	if (strcmp(state, "created\n") && strcmp(state, "exited\n"))
 		bad("container is not stopped");
+
 	int command = file(container, "command", O_RDONLY, 0);
 	if (command < 0)
 		die("open command");
@@ -842,8 +936,10 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	close(command);
 	if (n <= 0 || n > MAX_BYTES || data[n - 1] != 0)
 		bad("invalid command record");
+
 	char *args[MAX_ARGS + 1];
 	int count = 0;
+
 	for (ssize_t j = 0; j < n;) {
 		if (count == MAX_ARGS)
 			bad("too many saved arguments");
@@ -859,6 +955,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	if (args[0][0] != '/' &&
 	    (!has_image || strchr(args[0], '/') || !*args[0]))
 		bad("command must be absolute inside rootfs");
+
 	int log = file(container, "log", O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (log < 0)
 		die("open log");
@@ -868,6 +965,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 		must(pipe(owner), "owner pipe");
 	if (unlinkat(container, "exitcode", 0) < 0 && errno != ENOENT)
 		die("remove exitcode");
+
 	int caller_pid = (int)getpid();
 	pid_t launcher = fork();
 	if (launcher < 0)
@@ -897,9 +995,11 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 			       detached ? -1 : owner[0] };
 		must(backend_close_inherited(keep, 4),
 		     "close inherited descriptors");
+
 		int result = backend_enter(rootfs);
 		if (result < 0) {
 			unsigned char code = 125;
+
 			write_all(ack[1], &code, 1);
 			_exit(125);
 		}
@@ -914,6 +1014,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	close(ack[1]);
 	if (!detached)
 		close(owner[0]);
+
 	int ignored;
 	while (waitpid(launcher, &ignored, 0) < 0 && errno == EINTR) {
 	}
@@ -929,17 +1030,21 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 		 * fences until that generation releases runtime ownership. */
 		int runtime = runtime_open(container),
 		    pid = runtime_pid(runtime);
+
 		if (pid) {
 			int handle = backend_pidfd_open(pid);
+
 			if (handle < 0 && errno != ESRCH)
 				die("open failed startup init");
 			if (handle >= 0 && runtime_pid(runtime) == pid) {
 				struct pollfd done = { .fd = handle,
 						       .events = POLLIN };
 				long long deadline = monotonic_ms() + 12000;
+
 				for (;;) {
 					long long left =
 						deadline - monotonic_ms();
+
 					if (left <= 0)
 						bad("startup failure cleanup timed out");
 					int n = poll(&done, 1, (int)left);
@@ -963,6 +1068,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 		if (diagnostic >= 0) {
 			char buf[4096];
 			ssize_t bytes;
+
 			while ((bytes = read(diagnostic, buf, sizeof buf)) > 0)
 				write_all(2, buf, (size_t)bytes);
 			close(diagnostic);
@@ -984,6 +1090,7 @@ static int start(int container, const char *rootfs, int detached, int *lockfd,
 	must(close(attachment), "close foreground attachment");
 	return result;
 }
+
 /* Direct calls must restore closed stdio before opening manager descriptors. */
 static void restore_stdio(void)
 {
@@ -1001,6 +1108,7 @@ static void restore_stdio(void)
 		}
 	}
 }
+
 static int state_open(const char *root)
 {
 	restore_stdio();
@@ -1013,6 +1121,7 @@ static int state_open(const char *root)
 		bad("state directory must be owned by you and mode 0700");
 	return state;
 }
+
 int geranium_open_state_root(const char *root)
 {
 	return state_open(root);
@@ -1023,6 +1132,7 @@ static void require_name(const char *name)
 	if (!name || !name_ok(name))
 		bad("invalid container name");
 }
+
 static int create_or_run(const char *root, enum geranium_source source_type,
 			 const char *source, const char *name,
 			 int command_count, const char *const command[],
@@ -1041,11 +1151,13 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	for (int j = 0; j < command_count; j++)
 		if (!command[j])
 			bad("null command argument");
+
 	int state = state_open(root), lock;
 	int from_image = source_type == GERANIUM_SOURCE_IMAGE;
 	int image_lock = -1;
 	struct image_config config;
 	int src;
+
 	if (from_image)
 		src = image_open(state, source, &image_lock, &config);
 	else {
@@ -1055,6 +1167,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	}
 	const char *const *args = command;
 	int nargs = command_count;
+
 	if (!nargs && from_image) {
 		args = (const char *const *)config.args;
 		while (args[nargs]) {
@@ -1078,6 +1191,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	if (srcst.st_uid != geteuid() || srcst.st_gid != getegid() ||
 	    (srcst.st_mode & (from_image ? 06000 : 07000)))
 		bad("unsupported rootfs directory identity or mode");
+
 	lock = command_lock(state, name);
 	char pending[80];
 	if (snprintf(pending, sizeof pending, ".pending-%s", name) >=
@@ -1087,6 +1201,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	if (fstatat(state, name, &exists, AT_SYMLINK_NOFOLLOW) == 0 ||
 	    errno != ENOENT)
 		bad("container already exists or cannot check name");
+
 	reclaim_stage(state, pending);
 	if (mkdirat(state, pending, 0700) < 0)
 		die("stage container");
@@ -1098,12 +1213,14 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	if (dst < 0)
 		die("open destination");
 	unsigned count = 0;
+
 	copytree(src, dst, 0, &count, from_image, dst, "");
 	must(close(src), "close source rootfs");
 	must(close(dst), "close copied rootfs");
 	must(fchmodat(container, "rootfs",
 		      srcst.st_mode & (from_image ? 01777 : 0777), 0),
 	     "chmod copied rootfs");
+
 	int cmd = file(container, "command", O_WRONLY | O_CREAT | O_EXCL, 0600);
 	if (cmd < 0)
 		die("create command");
@@ -1111,6 +1228,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 		write_all(cmd, args[j], strlen(args[j]) + 1);
 	must(fsync(cmd), "sync command");
 	must(close(cmd), "close command");
+
 	if (from_image) {
 		image_config_save(container, &config);
 		free(config.source);
@@ -1122,11 +1240,13 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	must(fsync(state), "sync published container");
 	if (run) {
 		char path[PATH_MAX];
+
 		if (snprintf(path, sizeof path, "%s/%s/rootfs", root, name) >=
 		    (int)sizeof path)
 			bad("state path too long");
 		int result =
 			start(container, path, detached, &lock, state, name);
+
 		must(close(container), "close run container");
 		if (lock >= 0)
 			must(close(lock), "close run lock");
@@ -1139,6 +1259,7 @@ static int create_or_run(const char *root, enum geranium_source source_type,
 	strerr_warnn(2, "geranium: ", "created");
 	return 0;
 }
+
 int geranium_create(const char *root, enum geranium_source source_type,
 		    const char *source, const char *name, int command_count,
 		    const char *const command[])
@@ -1146,6 +1267,7 @@ int geranium_create(const char *root, enum geranium_source source_type,
 	return create_or_run(root, source_type, source, name, command_count,
 			     command, false, false);
 }
+
 int geranium_run(const char *root, enum geranium_source source_type,
 		 const char *source, const char *name, int command_count,
 		 const char *const command[], bool detached)
@@ -1153,18 +1275,21 @@ int geranium_run(const char *root, enum geranium_source source_type,
 	return create_or_run(root, source_type, source, name, command_count,
 			     command, true, detached);
 }
+
 int geranium_pull(const char *root, const char *reference, bool http_loopback)
 {
 	if (!reference)
 		bad("reference required");
 	return image_pull(state_open(root), reference, http_loopback);
 }
+
 int geranium_rmi(const char *root, const char *reference)
 {
 	if (!reference)
 		bad("reference required");
 	return image_remove(state_open(root), reference);
 }
+
 int geranium_logs(const char *root, const char *name)
 {
 	require_name(name);
@@ -1177,6 +1302,7 @@ int geranium_logs(const char *root, const char *name)
 	if (log < 0)
 		die("open log");
 	close(lock);
+
 	char buf[4096];
 	ssize_t n;
 	while ((n = read(log, buf, sizeof buf)) > 0)
@@ -1188,6 +1314,7 @@ int geranium_logs(const char *root, const char *name)
 	close(state);
 	return 0;
 }
+
 int geranium_start(const char *root, const char *name, bool detached)
 {
 	require_name(name);
@@ -1200,6 +1327,7 @@ int geranium_start(const char *root, const char *name, bool detached)
 	if (snprintf(path, sizeof path, "%s/%s/rootfs", root, name) >=
 	    (int)sizeof path)
 		bad("state path too long");
+
 	int result = start(container, path, detached, &lock, state, name);
 	must(close(container), "close start container");
 	if (lock >= 0)
@@ -1207,6 +1335,7 @@ int geranium_start(const char *root, const char *name, bool detached)
 	must(close(state), "close start state");
 	return result;
 }
+
 int geranium_stop(const char *root, const char *name)
 {
 	require_name(name);
@@ -1221,23 +1350,28 @@ int geranium_stop(const char *root, const char *name)
 	int handle = backend_pidfd_open(pid);
 	if (handle < 0 || runtime_pid(runtime) != pid)
 		bad("runtime identity changed");
+
 	if (backend_signal(handle, SIGTERM) < 0 && errno != ESRCH)
 		die("signal init TERM");
 	long long deadline = monotonic_ms() + 2000;
 	while (runtime_pid(runtime) == pid && monotonic_ms() < deadline) {
 		struct timespec pause = { 0, 20000000 };
+
 		nanosleep(&pause, NULL);
 	}
+
 	if (runtime_pid(runtime) == pid &&
 	    backend_signal(handle, SIGKILL) < 0 && errno != ESRCH)
 		die("signal init KILL");
 	deadline = monotonic_ms() + 2000;
 	while (runtime_pid(runtime) == pid && monotonic_ms() < deadline) {
 		struct timespec pause = { 0, 20000000 };
+
 		nanosleep(&pause, NULL);
 	}
 	if (runtime_pid(runtime))
 		bad("stop timed out");
+
 	close(handle);
 	close(runtime);
 	char status[64];
@@ -1248,6 +1382,7 @@ int geranium_stop(const char *root, const char *name)
 	strerr_warnn(2, "geranium: ", "stopped");
 	return 0;
 }
+
 static int inspect_or_rm(const char *root, const char *name, bool remove)
 {
 	require_name(name);
@@ -1261,6 +1396,7 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 	if (container < 0) {
 		if (errno != ENOENT || !remove)
 			die("open container");
+
 		struct stat st;
 		if (fstatat(state, stage, &st, AT_SYMLINK_NOFOLLOW) < 0)
 			die("open pending removal");
@@ -1281,6 +1417,7 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 		close(state);
 		return 0;
 	}
+
 	int occupied = runtime_open(container);
 	if (runtime_pid(occupied))
 		bad("container runtime is still owned");
@@ -1291,6 +1428,7 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 	if (runtime_pid(attachment))
 		bad("foreground client is still attached");
 	must(close(attachment), "close removal attachment");
+
 	reclaim_stage(state, stage);
 	/* Atomic unpublication precedes destructive cleanup. */
 	must(renameat(state, name, state, stage), "unpublish container");
@@ -1304,10 +1442,12 @@ static int inspect_or_rm(const char *root, const char *name, bool remove)
 	strerr_warnn(2, "geranium: ", "removed container");
 	return 0;
 }
+
 int geranium_inspect(const char *root, const char *name)
 {
 	return inspect_or_rm(root, name, false);
 }
+
 int geranium_rm(const char *root, const char *name)
 {
 	return inspect_or_rm(root, name, true);

@@ -22,6 +22,7 @@ int main(int argc, char **argv)
 	int ch;
 
 	cli_stdio();
+
 	if (argc == 3 && !strcmp(argv[1], "--root") && cli_help(argv[2])) {
 		cli_usage(stdout, "create", arguments);
 		return 0;
@@ -30,10 +31,12 @@ int main(int argc, char **argv)
 		cli_usage(stderr, "create", arguments);
 		return 1;
 	}
+
 	opterr = 0;
 	optind = 1;
 	while (1) {
 		int before = optind, index = -1;
+
 		ch = getopt_long(argc, argv, "+:h", options, &index);
 		if (ch == -1)
 			break;
@@ -47,6 +50,7 @@ int main(int argc, char **argv)
 			problem = diagnostic;
 			break;
 		}
+
 		switch (ch) {
 		case 'r':
 			if (root) {
@@ -88,8 +92,10 @@ int main(int argc, char **argv)
 		if (problem)
 			break;
 	}
+
 	if (!root) {
 		const char *home = getenv("HOME");
+
 		if (!home)
 			cli_fail("HOME missing; specify --root");
 		if (snprintf(fallback, sizeof fallback,
@@ -98,6 +104,7 @@ int main(int argc, char **argv)
 			cli_fail("HOME too long");
 		root = fallback;
 	}
+
 	if (problem)
 		cli_operation_fail(root, problem);
 	if (optind >= argc) {
@@ -116,6 +123,7 @@ int main(int argc, char **argv)
 		cli_operation_fail(root, "invalid container name");
 	if (argc - optind > GERANIUM_COMMAND_ARGS_MAX)
 		cli_operation_fail(root, "too many arguments");
+
 	return geranium_create(root, source_type, source, name, argc - optind,
 			       (const char *const *)(argv + optind));
 }

@@ -13,25 +13,30 @@ static pid_t owner, other;
 static volatile sig_atomic_t notifications, reaped;
 static int wake;
 static const char *trace, *gate;
+
 static void handler(int sig)
 {
 	int saved = errno;
+
 	if (sig == SIGUSR1) {
 		if (write(wake, "x", 1) != 1)
 			_exit(25);
 	} else if (sig == SIGCHLD) {
 		int status;
+
 		notifications++;
 		if (other > 0 && waitpid(other, &status, WNOHANG) == other)
 			reaped = WIFEXITED(status) && WEXITSTATUS(status) == 23;
 	}
 	errno = saved;
 }
+
 static void callback(void)
 {
 	char line[64];
 	int n = snprintf(line, sizeof line, "%ld\n", (long)getpid());
 	int fd = open(trace, O_WRONLY | O_CREAT | O_APPEND, 0600);
+
 	if (fd >= 0) {
 		if (write(fd, line, (size_t)n) != n)
 			_exit(26);
@@ -65,6 +70,7 @@ int main(int argc, char **argv)
 							   0;
 	if (masked_signal) {
 		sigset_t mask, pending;
+
 		sigemptyset(&mask);
 		sigaddset(&mask, masked_signal);
 		if (sigprocmask(SIG_BLOCK, &mask, NULL) || raise(masked_signal))
@@ -81,6 +87,7 @@ int main(int argc, char **argv)
 	}
 	if (!strncmp(mode, "callback", 8)) {
 		static char trace_path[4096], gate_path[4096];
+
 		if (snprintf(trace_path, sizeof trace_path, "%s.trace",
 			     argv[3]) >= (int)sizeof trace_path ||
 		    snprintf(gate_path, sizeof gate_path, "%s.gate", argv[3]) >=
@@ -96,6 +103,7 @@ int main(int argc, char **argv)
 #endif
 		return geranium_pull(argv[1], argv[2], 1);
 	}
+
 	int ignore = !strcmp(mode, "ignore");
 	int nocldwait = !strcmp(mode, "nocldwait");
 	int pending = !strcmp(mode, "pending");
@@ -134,6 +142,7 @@ int main(int argc, char **argv)
 		return 5;
 	if (!ignored_signal) {
 		int ready[2];
+
 		if (pipe(ready))
 			return 6;
 		wake = ready[1];
@@ -151,6 +160,7 @@ int main(int argc, char **argv)
 		close(ready[0]);
 		if (pending) {
 			siginfo_t info;
+
 			if (waitid(P_PID, (id_t)other, &info,
 				   WEXITED | WNOWAIT) ||
 			    sigpending(&mask) || !sigismember(&mask, SIGCHLD))
@@ -159,6 +169,7 @@ int main(int argc, char **argv)
 		printf("other %ld\n", (long)other);
 		fflush(stdout);
 	}
+
 	if (geranium_pull(argv[1], argv[2], 1))
 		return 7;
 	if (sigaction(SIGCHLD, NULL, &action) ||
@@ -199,6 +210,7 @@ int main(int argc, char **argv)
 			return 19;
 	} else if (other > 0) {
 		int status;
+
 		if (waitpid(other, &status, 0) != other || !WIFEXITED(status) ||
 		    WEXITSTATUS(status) != 23)
 			return 12;

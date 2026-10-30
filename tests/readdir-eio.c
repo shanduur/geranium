@@ -7,12 +7,14 @@
 #include <unistd.h>
 
 struct dirent *__real_readdir(DIR *dir);
+
 /* Fail only the selected directory, after one real non-dot entry. */
 struct dirent *__wrap_readdir(DIR *dir)
 {
 	const char *path = getenv("GERANIUM_READDIR_EIO");
 	struct stat target, actual;
 	static int seen;
+
 	if (path && stat(path, &target) == 0 &&
 	    fstat(dirfd(dir), &actual) == 0 && target.st_dev == actual.st_dev &&
 	    target.st_ino == actual.st_ino) {

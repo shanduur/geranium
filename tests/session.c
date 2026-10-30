@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
 int main(int argc, char **argv)
 {
 	if (argc < 4)
@@ -31,6 +32,7 @@ int main(int argc, char **argv)
 	int status;
 	if (waitpid(child, &status, 0) != child)
 		return 1;
+
 	char path[4096], state[32];
 	if (snprintf(path, sizeof path, "%s/demo/status", argv[1]) >=
 	    (int)sizeof path)

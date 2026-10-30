@@ -5,11 +5,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && !strcmp(argv[1], "kill-init")) {
 		int fd = open(argv[2], O_RDWR);
 		struct flock lock = { 0 };
+
 		lock.l_type = F_WRLCK;
 		lock.l_whence = SEEK_SET;
 		if (fd < 0 || fcntl(fd, F_GETLK, &lock) < 0 ||
@@ -27,6 +29,7 @@ int main(int argc, char **argv)
 	}
 	if (argc < 3)
 		return 1;
+
 	struct rlimit r;
 	if (getrlimit(RLIMIT_NOFILE, &r) < 0)
 		return 1;
@@ -40,6 +43,7 @@ int main(int argc, char **argv)
 		if (setrlimit(RLIMIT_NOFILE, &r) < 0)
 			return 1;
 	}
+
 	int fd = open("/", O_RDONLY);
 	if (fd < 0 || dup2(fd, 2048) < 0)
 		return 1;

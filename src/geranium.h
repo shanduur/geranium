@@ -25,11 +25,15 @@ int geranium_create(const char *root, enum geranium_source source_type,
 int geranium_run(const char *root, enum geranium_source source_type,
 		 const char *source, const char *name, int command_count,
 		 const char *const command[], bool detached);
+
 int geranium_start(const char *root, const char *name, bool detached);
 int geranium_stop(const char *root, const char *name);
+
 int geranium_inspect(const char *root, const char *name);
 int geranium_logs(const char *root, const char *name);
+
 int geranium_rm(const char *root, const char *name);
+
 int geranium_pull(const char *root, const char *reference, bool http_loopback);
 int geranium_rmi(const char *root, const char *reference);
 

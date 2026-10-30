@@ -17,6 +17,7 @@ static int fixture_getaddrinfo(const char *host, const char *port,
 	printf("connection identity %s:%s\n", host, port);
 	return getaddrinfo(host, fixture_port, hints, result);
 }
+
 int main(int argc, char **argv)
 {
 	if (argc != 3)

@@ -6,12 +6,14 @@
 #include <string.h>
 #include <unistd.h>
 struct dirent *__real_readdir(DIR *);
+
 /* Return status first, then interrupt only after production unlink removed it. */
 struct dirent *__wrap_readdir(DIR *dir)
 {
 	static int phase;
 	static struct dirent status;
 	const char *mode = getenv("REMOVE_FAULT");
+
 	if (mode && !phase && faccessat(dirfd(dir), "status", F_OK, 0) == 0) {
 		phase = 1;
 		strcpy(status.d_name, "status");
@@ -41,14 +43,19 @@ struct dirent *__wrap_readdir(DIR *dir)
 	}
 	return __real_readdir(dir);
 }
+
 #include <sys/stat.h>
 #include <stdio.h>
+
 static int fault(const char *name)
 {
 	const char *f = getenv("REMOVE_OP");
+
 	return f && !strcmp(f, name);
 }
+
 int __real_renameat(int, const char *, int, const char *);
+
 int __wrap_renameat(int a, const char *b, int c, const char *d)
 {
 	if (fault("rename")) {
@@ -57,10 +64,13 @@ int __wrap_renameat(int a, const char *b, int c, const char *d)
 	}
 	return __real_renameat(a, b, c, d);
 }
+
 int __real_fsync(int);
+
 int __wrap_fsync(int fd)
 {
 	static int count;
+
 	++count;
 	if ((fault("sync-unpublish") && count == 1) ||
 	    (fault("sync-remove") && count == 2)) {
@@ -69,35 +79,45 @@ int __wrap_fsync(int fd)
 	}
 	return __real_fsync(fd);
 }
+
 static int selected(int fd)
 {
 	struct stat a, b;
 	const char *path = getenv("REMOVE_STAGE");
+
 	return path && fstat(fd, &a) == 0 && stat(path, &b) == 0 &&
 	       a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
+
 int __real_close(int);
+
 int __wrap_close(int fd)
 {
 	int hit = fault("close") && selected(fd), rc = __real_close(fd);
+
 	if (hit) {
 		errno = EIO;
 		return -1;
 	}
 	return rc;
 }
+
 int __real_closedir(DIR *);
+
 int __wrap_closedir(DIR *dir)
 {
 	int hit = fault("closedir") && selected(dirfd(dir)),
 	    rc = __real_closedir(dir);
+
 	if (hit) {
 		errno = EIO;
 		return -1;
 	}
 	return rc;
 }
+
 int __real_unlinkat(int, const char *, int);
+
 int __wrap_unlinkat(int fd, const char *name, int flags)
 {
 	if (fault("unlink-stage") && flags == AT_REMOVEDIR &&

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <time.h>
 ssize_t __real_read(int, void *, size_t);
+
 ssize_t __wrap_read(int fd, void *buffer, size_t n)
 {
 	static int paused;
@@ -13,6 +14,7 @@ ssize_t __wrap_read(int fd, void *buffer, size_t n)
 		   *ready = getenv("IMAGE_COPY_READY"),
 		   *release = getenv("IMAGE_COPY_RELEASE");
 	struct stat actual, wanted;
+
 	if (!paused && target && ready && release && fstat(fd, &actual) == 0 &&
 	    stat(target, &wanted) == 0 && actual.st_dev == wanted.st_dev &&
 	    actual.st_ino == wanted.st_ino) {
