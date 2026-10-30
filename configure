@@ -128,10 +128,12 @@ esac
         printf 'gu-%s: src/%s.c src/geranium.h src/cli.h $(LIBRARY) Makefile\n' "$verb" "$verb"
         printf '\t"$(CC)" $(CPPFLAGS) $(CFLAGS) -std=c99 -Wall -Wextra -o $@ src/%s.c $(LDFLAGS) $(RUNPATH_FLAGS) -L. -lgeranium $(LDLIBS)\n' "$verb"
     done
-    printf '%s\n' 'CLANG_FORMAT = clang-format' 'fmt:'
-    printf '\t%s\n' '"$(CLANG_FORMAT)" -i src/*.c src/*.h tests/*.c'
+    printf '%s\n' 'UV = uv' 'CLANG_FORMAT = clang-format' 'fmt:'
+    printf '\t%s\n' '"$(CLANG_FORMAT)" -i src/*.c src/*.h tests/*.c' '$(MAKE) -f tools.mk fmt "UV=$(UV)"'
     printf '%s\n' 'check-format:'
-    printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c'
+    printf '\t%s\n' '"$(CLANG_FORMAT)" --dry-run --Werror src/*.c src/*.h tests/*.c' '$(MAKE) -f tools.mk check-format "UV=$(UV)"'
+    printf '%s\n' 'lint:'
+    printf '\t%s\n' '$(MAKE) -f tools.mk lint "UV=$(UV)"'
     printf '%s\n' 'test: all'
     for script in dependencies json output library command-names cli-options backend-architectures image-platform lifecycle isolated run restart recovery safety invalid live stop owned advanced descriptors death generation runtime-fence diagnostic pivot session close-budget stdio publication parent-death exec-readiness startup-cancel stop-race command-lock readdir-eio removal completion toolchain portable images image-race pull-workers pull-fatal; do
         printf '\tMAKE="$(MAKE)" CC="$(CC)" CPPFLAGS="$(CPPFLAGS)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" LDLIBS="$(LDLIBS)" sh tests/%s.sh\n' "$script"

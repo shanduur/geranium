@@ -4,13 +4,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' 0 1 2 3 15
 reference=hello-world:latest
 ./gu-pull --root "$work/state" "$reference"
-python3 - "$work/state" <<'PY'
-import sys,pathlib,json,hashlib
-p=next(pathlib.Path(sys.argv[1]).glob('.images/*/manifest.json'))
-print('Public Docker Hub selected manifest: sha256:'+hashlib.sha256(p.read_bytes()).hexdigest())
-c=json.loads(p.parent.joinpath('config.json').read_bytes())
-print('Public image platform:',c['os'],c['architecture'],'command:',c['config']['Cmd'])
-PY
+python3 tests/public-image-info.py "$work/state"
 ./gu-create --root "$work/state" --image "$reference" public
 ./gu-start --root "$work/state" public > "$work/first"
 grep 'Hello from Docker!' "$work/first"

@@ -12,6 +12,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  python:
+    name: Python / Ruff and ty
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.24"
+          python-version: "3.11"
+      - name: Check Python
+        run: make -f tools.mk lint
   linux-musl:
     name: Shared musl / BSD make / root and rootless isolation
     runs-on: ubuntu-24.04

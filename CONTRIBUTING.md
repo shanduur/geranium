@@ -66,3 +66,28 @@ between related statements solely because their syntax differs.
 
 Clang-format handles mechanical formatting. Review logical grouping and
 blank-line placement manually.
+
+## Python test sources
+
+Use Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) for development.
+`pyproject.toml` and `uv.lock` pin Ruff and ty. The Make targets use
+`uv run --locked`, which creates the development environment automatically
+and rejects an out-of-date lockfile.
+
+After configuring the C build, run:
+
+```sh
+make fmt
+make check-format
+make lint
+```
+
+`fmt` and `check-format` cover C with clang-format 18 and Python with Ruff.
+`lint` checks Python with Ruff and ty, treating type-checker warnings as
+errors. Keep Python helpers in `.py` files, not shell heredocs, so both tools
+check them. Fix diagnostics rather than adding blanket suppressions.
+
+For Python-only work before configuring the C toolchain, run
+`make -f tools.mk lint`. CI uses the same target. Build and runtime tests
+still use the system `python3` directly and do not require uv, Ruff, or ty.
+Do not add these development tools as runtime dependencies.

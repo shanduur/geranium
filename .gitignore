@@ -6,3 +6,5 @@
 /libgeranium.dylib
 __pycache__/
 *.py[cod]
+/.venv/
+/.ruff_cache/

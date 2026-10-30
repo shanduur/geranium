@@ -33,6 +33,15 @@ on a separate line. Run `make fmt` and `make check-format`; override
 changes behavior-preserving. The upstream configuration retains its GPL-2.0
 SPDX notice; Geranium's implementation remains under the Unlicense.
 
+## Python tooling
+
+Use the locked uv project for Python test development. Ruff formats and lints
+all `.py` helpers; ty checks their types with warnings treated as errors.
+Run `make fmt`, `make check-format`, and `make lint` after configuring, or
+`make -f tools.mk lint` for Python-only checks without the C toolchain.
+Keep Python helpers out of shell heredocs so these checks cover them.
+The C build and runtime tests must not depend on uv, Ruff, or ty.
+
 ## Portability
 
 - Target musl on Linux first, but preserve portability to BSD, Darwin, and illumos.

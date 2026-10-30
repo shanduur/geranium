@@ -42,18 +42,9 @@ for maker in make bmake; do
     mkdir "$build"
     cp -R src configure "$build/"
     (cd "$build" && CC="$PORTABLE_REAL_CC" CFLAGS='-O0' sh configure && "$maker" -j4)
-    python3 - "$build" <<'PY'
-import pathlib,sys,os
-p=pathlib.Path(sys.argv[1]); files=[*p.glob('*.o'),*p.glob('libgeranium.*'),*p.glob('gu-*')]
-t=max(x.stat().st_mtime_ns for x in files)
-(p/'clock').write_text(str(t))
-for x in files: os.utime(x,ns=(t,t))
-PY
+    python3 tests/portable-clock.py "$build"
     (cd "$build" && CC="$PORTABLE_REAL_CC" GERANIUM_BACKEND=unsupported CFLAGS='-O0' sh configure)
-    python3 - "$build" <<'PY'
-import pathlib,sys,os
-p=pathlib.Path(sys.argv[1]); t=int((p/'clock').read_text()); os.utime(p/'Makefile',ns=(t,t))
-PY
+    python3 tests/portable-makefile-clock.py "$build"
     (cd "$build" && "$maker" -j4 && mkdir fixture && ./gu-create --root "$build/state" --rootfs "$build/fixture" x /bin/true)
     if "$build/gu-start" --root "$build/state" x > "$build/error" 2>&1; then
         echo "$maker reused Linux backend after reconfigure" >&2; exit 1

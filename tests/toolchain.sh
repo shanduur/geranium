@@ -38,12 +38,7 @@ for maker in make bmake; do
  (cd "$w" && CC="$w/compiler space/cc" CPPFLAGS="-include $w/header.h" CFLAGS='-O0 -Wall -Wextra -Werror' LDFLAGS='-Wl,--as-needed' LDLIBS='-lm' sh configure)
  test ! -e "$w/executed.log"
  # Exercise the exact generated recipe without recursively running this test.
- python3 - "$w/Makefile" <<'PY'
-import sys
-p=sys.argv[1]; s=open(p).read(); lines=s.splitlines()
-recipe='\n'.join(x for x in lines if any('sh tests/'+name+'.sh' in x for name in ('readdir-eio','removal')))
-open(p,'w').write(s+'\nfixture-test: all\n'+recipe+'\n')
-PY
+ python3 tests/toolchain-fixture.py "$w/Makefile"
  (cd "$w" && env -u CC -u CPPFLAGS -u CFLAGS -u LDFLAGS -u LDLIBS "$maker" fixture-test)
  grep 'tests/readdir-eio.c' "$w/compiler.log" | grep -- '-include' >/dev/null
  test -s "$w/executed.log"
