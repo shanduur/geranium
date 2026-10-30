@@ -22,6 +22,9 @@ Deliver working vertical increments with explicit remaining scope, never success
 
 ## C formatting
 
+Follow the [code style guidelines in CONTRIBUTING.md](CONTRIBUTING.md#code-style),
+including the rules for logical grouping and vertical whitespace.
+
 Use clang-format 18 with the checked-in `.clang-format`, copied unchanged from
 Linux v6.18. Apply it to production C sources, headers, and C test fixtures.
 The kernel rules use eight-column tabs, an 80-column target, and function braces
