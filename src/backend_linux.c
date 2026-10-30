@@ -242,7 +242,14 @@ int backend_enter(const char *rootfs)
 
 const char *backend_image_arch(void)
 {
-#if defined(__x86_64__)
+#if defined(__riscv) && defined(__riscv_xlen) && __riscv_xlen == 64
+	return "riscv64";
+#elif defined(__powerpc64__) && defined(__BYTE_ORDER__) && \
+	__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return "ppc64le";
+#elif defined(__s390x__)
+	return "s390x";
+#elif defined(__x86_64__)
 	return "amd64";
 #elif defined(__aarch64__)
 	return "arm64";

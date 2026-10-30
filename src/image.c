@@ -26,6 +26,14 @@ static void fail(const char *s)
 	fprintf(stderr, "geranium image: %s\n", s);
 	geranium_fatal_exit(1);
 }
+static void platform_error(const char *context, const char *arch)
+{
+	if (!arch)
+		fail("unsupported host architecture for Linux images");
+	fprintf(stderr, "geranium image: %s (expected linux/%s)\n", context,
+		arch);
+	geranium_fatal_exit(1);
+}
 static void check(int n, const char *s)
 {
 	if (n < 0) {
@@ -617,9 +625,11 @@ static void config_parse(yyjson_val *j, struct image_config *c)
 {
 	memset(c, 0, sizeof *c);
 	const char *arch = backend_image_arch();
-	if (!arch || strcmp(json_string(json_get(j, "os")), "linux") ||
+	if (!arch)
+		platform_error("unsupported image platform", arch);
+	if (strcmp(json_string(json_get(j, "os")), "linux") ||
 	    strcmp(json_string(json_get(j, "architecture")), arch))
-		fail("unsupported image platform");
+		platform_error("unsupported image platform", arch);
 	yyjson_val *config = json_get(j, "config");
 	if (!config || !yyjson_is_obj(config))
 		fail("missing image configuration");
@@ -749,8 +759,10 @@ int image_pull(int state, const char *input, int local_http)
 			fail("unsupported index schema");
 		yyjson_val *list = json_get(j, "manifests"), *selected = NULL;
 		const char *arch = backend_image_arch();
-		if (!arch || !list || !yyjson_is_arr(list))
-			fail("unsupported index platform");
+		if (!list || !yyjson_is_arr(list))
+			fail("invalid image index manifests array");
+		if (!arch)
+			platform_error("unsupported index platform", arch);
 		size_t index, length;
 		yyjson_val *d;
 		yyjson_arr_foreach(list, index, length, d)
@@ -772,7 +784,9 @@ int image_pull(int state, const char *input, int local_http)
 			}
 		}
 		if (!selected)
-			fail("matching Linux image platform not found");
+			platform_error(
+				"matching Linux image platform not found",
+				arch);
 		const char *dg = json_string(json_get(selected, "digest"));
 		unsigned long long sz = json_uint(json_get(selected, "size"));
 		if (!digest_ok(dg) || sz > 1024 * 1024 ||
@@ -944,13 +958,27 @@ int image_open(int state, const char *input, int *lock, struct image_config *c)
 	struct reference r = reference(input);
 	int fd = store(state);
 	*lock = lock_image(fd, r.key);
-	int image = dir(fd, r.key);
+	int image = openat(fd, r.key,
+			   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (image < 0 && errno == ENOENT) {
+		fprintf(stderr,
+			"geranium image: image %s not found; run gu-pull with the same --root to download it\n",
+			input);
+		geranium_fatal_exit(1);
+	}
+	check(image, "image directory");
 	struct stat st;
 	check(fstat(image, &st), "image stat");
 	if (st.st_uid != geteuid() || (st.st_mode & 0077))
 		fail("unsafe published image");
 	(void)config_read(image, "config.json", c, 0);
-	int root = dir(image, "rootfs");
+	int root = openat(image, "rootfs",
+			  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+	if (root < 0) {
+		fprintf(stderr, "geranium image: image %s: %s rootfs\n", input,
+			errno == ENOENT ? "missing" : "invalid image");
+		geranium_fatal_exit(1);
+	}
 	close(image);
 	close(fd);
 	return root;

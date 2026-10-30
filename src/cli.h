@@ -56,7 +56,7 @@ static inline void cli_operation_fail(const char *root, const char *message)
 	cli_fail(message);
 }
 
-static int cli_help(const char *s)
+static inline int cli_help(const char *s)
 {
 	return !strcmp(s, "--help") || !strcmp(s, "-h");
 }

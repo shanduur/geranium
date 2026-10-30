@@ -8,6 +8,7 @@ cat > "$work/compiler" <<'WRAP'
 #!/bin/sh
 set -eu
 case "$DEPENDENCY_NAME" in
+    getopt_long) library=; header=getopt.h;;
     yyjson) library=-lyyjson; header=yyjson.h;;
     skalibs) library=-lskarnet; header=skalibs/strerr.h;;
 esac
@@ -27,8 +28,14 @@ done
 "$DEPENDENCY_REAL_CC" "$@"
 WRAP
 chmod +x "$work/compiler"
-for dependency in yyjson skalibs; do
-    for missing in header library; do
+for dependency in getopt_long yyjson skalibs; do
+    missing_kinds='header library'
+    requirement='development library required'
+    if [ "$dependency" = getopt_long ]; then
+        missing_kinds=header
+        requirement='development interface required'
+    fi
+    for missing in $missing_kinds; do
         status=0
         (cd "$work" && CC="$work/compiler" DEPENDENCY_NAME="$dependency" DEPENDENCY_MISSING="$missing" sh configure) > "$work/error" 2>&1 || status=$?
         if [ "$status" -ne 1 ]; then
@@ -37,8 +44,8 @@ for dependency in yyjson skalibs; do
             exit 1
         fi
         grep "fixture: $dependency $missing unavailable" "$work/error"
-        grep "configure: $dependency development library required" "$work/error"
+        grep "configure: $dependency $requirement" "$work/error"
         test ! -e "$work/Makefile"
     done
 done
-echo 'missing yyjson/skalibs headers and libraries rejected independently PASS'
+echo 'missing getopt_long header and yyjson/skalibs headers and libraries rejected independently PASS'

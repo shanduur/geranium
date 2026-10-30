@@ -4,7 +4,8 @@ Geranium is Unlicensed C software for persistent Linux containers from an unpack
 rootfs or a registry image. It delivers nine independent executables: gu-pull,
 gu-rmi, gu-create, gu-start, gu-run, gu-stop,
 gu-inspect, gu-logs, and gu-rm. Build dependencies are a C99
-compiler, a shared-library linker, OpenSSL development libraries (libssl/libcrypto),
+compiler, a libc providing `getopt_long`, a shared-library linker, OpenSSL
+development libraries (libssl/libcrypto),
 zlib, yyjson (tested with 0.12.0), and skalibs development headers/libraries
 (tested with 2.14.4.0). On Alpine 3.23 install
 `openssl-dev zlib-dev yyjson-dev skalibs-dev`. Configure probes these
@@ -31,8 +32,11 @@ make
 
 `run [--root PATH] [-d] --rootfs PATH NAME COMMAND [ARG ...]` combines create
 and start. `start [--root PATH] [-d] NAME` restarts the same writable rootfs.
-The option `--root` precedes other arguments on each executable; its default is
-$HOME/.local/state/geranium. Commands must be absolute paths within the rootfs.
+Options use `getopt_long` and may appear in any order before the first
+positional argument. Both `--root PATH` and `--root=PATH` are accepted; the default
+is `$HOME/.local/state/geranium`. Use `--` to end option parsing explicitly.
+Arguments after the container name belong to the workload, including flags such
+as `-c` or `--help`. Commands must be absolute paths within the rootfs.
 Foreground start/run stream stored stdout/stderr and return the workload status.
 Detached start/run return after successful exec. `stop NAME` sends TERM to init,
 waits two seconds, then forces KILL if necessary. `logs NAME` prints the latest
@@ -59,7 +63,9 @@ replaces Entrypoint+Cmd and retains Env and WorkingDir. Image workloads receive
 only image Env; rootfs workloads keep their existing `PATH=/bin:/usr/bin` environment.
 Default commands may use a basename searched in image PATH. Non-root User,
 non-Linux images, unsupported architectures, and ambiguous platform selections
-fail explicitly. Linux amd64 and arm64/v8 are the supported image platforms.
+fail explicitly. Image selection recognizes Linux amd64, arm64/v8, riscv64,
+ppc64le, and s390x. Big-endian PowerPC is not treated as ppc64le. Architecture
+selection tests do not replace native runtime qualification on each target.
 
 Image layers support SHA256 descriptors/DiffIDs, gzip or plain ustar, regular
 files, directories, symlinks, and hardlinks to existing regular files inside the

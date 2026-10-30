@@ -14,17 +14,14 @@ done
 long_name=$(printf '%064d' 0)
 for verb in start stop inspect logs rm create run; do
     case "$verb" in
-        start) diagnostic='start [-d] NAME' ;;
-        stop) diagnostic='stop NAME' ;;
-        logs) diagnostic='logs NAME' ;;
-        inspect|rm) diagnostic='inspect|rm NAME' ;;
+        start|stop|logs|inspect|rm) diagnostic='unexpected arguments; expected NAME' ;;
         create|run) diagnostic='invalid container name' ;;
     esac
     printf 'geranium: %s\n' "$diagnostic" > "$work/expected"
     for name in '../bad' '-bad' 'bad.name' '' "$long_name"; do
         case "$verb" in
-            create|run) set -- --rootfs "$work/rootfs" "$name" /bin/true ;;
-            *) set -- "$name" ;;
+            create|run) set -- --rootfs "$work/rootfs" -- "$name" /bin/true ;;
+            *) set -- -- "$name" ;;
         esac
         if "./gu-$verb" --root "$work/state" "$@" > "$work/out" 2> "$work/error"; then
             printf '%s accepted malformed name\n' "$verb" >&2
