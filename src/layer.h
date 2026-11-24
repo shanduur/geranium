@@ -11,7 +11,8 @@ enum layer_compression {
 
 void layer_apply(int root, int stage, const void *, size_t,
 		 enum layer_compression compression, const char *diff,
-		 unsigned long long *expanded);
+		 unsigned long long *expanded,
+		 unsigned long long *output_total);
 void image_delete_tree(int);
 unsigned layer_root_mode(void);
 

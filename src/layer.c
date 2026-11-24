@@ -215,7 +215,8 @@ struct seen_path {
 	struct seen_path *next;
 };
 
-static void extract(int root, int tar, int whiteouts, unsigned *warnings)
+static void extract(int root, int tar, int whiteouts, unsigned *warnings,
+		    unsigned long long *output_total)
 {
 	struct archive *archive;
 	struct archive_entry *entry;
@@ -237,14 +238,28 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings)
 	while ((status = archive_read_next_header(archive, &entry)) ==
 		       ARCHIVE_OK ||
 	       status == ARCHIVE_WARN) {
-		/* In the C locale libarchive warns about UTF-8 PAX names while
-		 * retaining their original bytes. Optional metadata warnings do not
-		 * invalidate the entry; all path and payload checks still apply. */
-		if (status == ARCHIVE_WARN && !(*warnings & 16)) {
-			fprintf(stderr,
-				"geranium layer: warning: tar metadata could not "
-				"be fully interpreted; original pathname bytes retained\n");
-			*warnings |= 16;
+		if (status == ARCHIVE_WARN) {
+			const char *error = archive_error_string(archive);
+
+			if (!error ||
+			    (strcmp(error,
+				    "Pathname can't be converted from UTF-8 to current locale") &&
+			     strcmp(error,
+				    "Pathname can't be converted from UTF-8 to current locale.") &&
+			     strcmp(error,
+				    "Linkname can't be converted from UTF-8 to current locale") &&
+			     strcmp(error,
+				    "Linkname can't be converted from UTF-8 to current locale.") &&
+			     strcmp(error,
+				    "Linkpath can't be converted from UTF-8 to current locale") &&
+			     strcmp(error,
+				    "Linkpath can't be converted from UTF-8 to current locale.")))
+				fail("corrupt tar header");
+			if (!(*warnings & 16)) {
+				fprintf(stderr,
+					"geranium layer: warning: tar pathname encoding could not be translated; original bytes retained\n");
+				*warnings |= 16;
+			}
 		}
 		const char *raw = archive_entry_pathname(entry);
 		const char *target = archive_entry_hardlink(entry);
@@ -434,6 +449,9 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings)
 					check(symlinkat(link, fd, leaf),
 					      "layer symlink");
 				} else {
+					if (size > EXPAND_LIMIT - *output_total)
+						fail("extracted image exceeds 4 GiB");
+					*output_total += size;
 					erase(fd, leaf);
 					int out = openat(
 						fd, leaf,
@@ -472,6 +490,7 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings)
 		fail("corrupt tar header");
 	if (archive_read_free(archive) != ARCHIVE_OK)
 		fail("close tar reader");
+	check(close(input), "close layer input");
 
 	for (unsigned i = 0; i < 4096; i++)
 		while (seen[i]) {
@@ -512,7 +531,7 @@ static void staged_bytes(int tar, EVP_MD_CTX *md, const void *data, size_t n,
 
 void layer_apply(int root, int stage, const void *bytes, size_t size,
 		 enum layer_compression compression, const char *diff,
-		 unsigned long long *expanded)
+		 unsigned long long *expanded, unsigned long long *output_total)
 {
 	int tar = openat(stage, "layer.tar",
 			 O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -592,8 +611,8 @@ void layer_apply(int root, int stage, const void *bytes, size_t size,
 
 	unsigned warnings = 0;
 
-	extract(root, tar, 1, &warnings);
-	extract(root, tar, 0, &warnings);
+	extract(root, tar, 1, &warnings, output_total);
+	extract(root, tar, 0, &warnings, output_total);
 	close(tar);
 	check(unlinkat(stage, "layer.tar", 0), "remove staged layer");
 }

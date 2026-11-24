@@ -22,6 +22,14 @@ def main():
             entry = tarfile.TarInfo(name)
             entry.size = len(data)
             archive.addfile(entry, io.BytesIO(data))
+            for link_type, link_name in (
+                (tarfile.SYMTYPE, "symlink"),
+                (tarfile.LNKTYPE, "hardlink"),
+            ):
+                link = tarfile.TarInfo(link_name)
+                link.type = link_type
+                link.linkname = name
+                archive.addfile(link)
         with (
             tempfile.TemporaryDirectory() as state,
             Registry([output.getvalue()]) as registry,
@@ -30,7 +38,13 @@ def main():
             roots = published_roots(state)
             assert len(roots) == 1
             assert (roots[0] / name).read_bytes() == data
-    print("PAX/GNU UTF-8 and USTAR byte filenames preserved in C locale PASS")
+            assert os.readlink(roots[0] / "symlink") == name
+            assert (roots[0] / "symlink").read_bytes() == data
+            assert (roots[0] / "hardlink").read_bytes() == data
+            assert (roots[0] / "hardlink").stat().st_ino == (
+                roots[0] / name
+            ).stat().st_ino
+    print("PAX/GNU UTF-8 and USTAR byte filenames and links preserved in C locale PASS")
 
 
 if __name__ == "__main__":

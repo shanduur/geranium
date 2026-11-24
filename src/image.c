@@ -603,7 +603,7 @@ static void pull_layers(int root, int stage, const struct reference *r,
 			struct pull_layer *layers, unsigned count, int local,
 			char **token)
 {
-	unsigned long long expanded = 0;
+	unsigned long long expanded = 0, output_total = 0;
 	long cpus = backend_pull_cpus();
 	struct sigaction children;
 
@@ -635,7 +635,7 @@ static void pull_layers(int root, int stage, const struct reference *r,
 			layer_progress(i, count, "extracting");
 			layer_apply(root, stage, data, layers[i].size,
 				    layers[i].compression, layers[i].diff,
-				    &expanded);
+				    &expanded, &output_total);
 			check(munmap(data, layers[i].size),
 			      "unmap downloaded layer");
 			check(close(file), "close downloaded layer");
@@ -675,7 +675,8 @@ static void pull_layers(int root, int stage, const struct reference *r,
 			check(-1, "map downloaded layer");
 		layer_progress(i, count, "extracting");
 		layer_apply(root, stage, data, layers[i].size,
-			    layers[i].compression, layers[i].diff, &expanded);
+			    layers[i].compression, layers[i].diff, &expanded,
+			    &output_total);
 		check(munmap(data, layers[i].size), "unmap downloaded layer");
 		close(slot->file);
 		slot->file = -1;

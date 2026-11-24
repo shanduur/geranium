@@ -9,6 +9,7 @@ import io
 import json
 import os
 import pathlib
+import resource
 import subprocess
 import sys
 import tarfile
@@ -55,7 +56,7 @@ def file(name, data, uid=0, gid=0, mode=0o644):
     return info, data
 
 
-def worker(libpath, rootpath, stagepath, layerpath, compression, rawpath):
+def worker(libpath, rootpath, stagepath, layerpath, compression, rawpath, preseed=0):
     library = ctypes.CDLL(libpath)
     library.layer_apply.argtypes = [
         ctypes.c_int,
@@ -64,6 +65,7 @@ def worker(libpath, rootpath, stagepath, layerpath, compression, rawpath):
         ctypes.c_size_t,
         ctypes.c_int,
         ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_ulonglong),
         ctypes.POINTER(ctypes.c_ulonglong),
     ]
     data = pathlib.Path(layerpath).read_bytes()
@@ -74,8 +76,18 @@ def worker(libpath, rootpath, stagepath, layerpath, compression, rawpath):
     root = os.open(rootpath, os.O_RDONLY | os.O_DIRECTORY)
     stage = os.open(stagepath, os.O_RDONLY | os.O_DIRECTORY)
     expanded = ctypes.c_ulonglong(0)
+    output_total = ctypes.c_ulonglong(preseed)
+    if preseed:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
     library.layer_apply(
-        root, stage, data, len(data), compression, diff, ctypes.byref(expanded)
+        root,
+        stage,
+        data,
+        len(data),
+        compression,
+        diff,
+        ctypes.byref(expanded),
+        ctypes.byref(output_total),
     )
     os.close(root)
     os.close(stage)
@@ -136,6 +148,81 @@ def main():
         assert result.stderr.count(b"ownership") == 1, result.stderr
         print("PASS: non-root ownership flattened, bytes and permissions retained")
 
+        if len(sys.argv) == 2 and sys.argv[1] == "--fd":
+            layers = [fixture([file(f"files/{i}", b"x")]) for i in range(48)]
+            with tempfile.TemporaryDirectory() as state, Registry(layers) as registry:
+
+                def limit_fds():
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (96, 96))
+
+                pulled = subprocess.run(
+                    [
+                        str(BASE / "gu-pull"),
+                        "--root",
+                        state,
+                        "--http-loopback",
+                        registry.ref,
+                    ],
+                    capture_output=True,
+                    preexec_fn=limit_fds,
+                )
+                assert pulled.returncode == 0, pulled.stderr
+                assert (published_roots(state)[0] / "files/47").read_bytes() == b"x"
+            print("PASS: 48-layer real pull under 96-descriptor limit")
+            return
+
+        if len(sys.argv) == 2 and sys.argv[1] == "--sparse":
+            sparse = tmp / "sparse.tar"
+            sparse_entry, sparse_data = file("hole", b"\0\0")
+            sparse_entry.pax_headers = {
+                "GNU.sparse.map": "0,1,33554431,1",
+                "GNU.sparse.size": str(32 * 1024 * 1024),
+            }
+            sparse.write_bytes(fixture([(sparse_entry, sparse_data)]))
+            sparse_root, sparse_stage = tmp / "sparse-root", tmp / "sparse-stage"
+            sparse_root.mkdir()
+            sparse_stage.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    __file__,
+                    "--worker",
+                    str(lib),
+                    str(sparse_root),
+                    str(sparse_stage),
+                    str(sparse),
+                    "0",
+                    str(sparse),
+                    str(4 * 1024**3 - 1024**2),
+                ],
+                capture_output=True,
+            )
+            assert (
+                result.returncode != 0 and b"extracted image exceeds" in result.stderr
+            ), result.stderr
+            assert not (sparse_root / "hole").exists()
+            print("PASS: sparse logical output rejected before writing holes")
+            return
+
+        if len(sys.argv) == 2 and sys.argv[1] == "--pax":
+            pax_entry, pax_data = file("fallback", b"should not publish")
+            pax_entry.pax_headers = {"path": "valid-pax-name"}
+            malformed = bytearray(fixture([(pax_entry, pax_data)]))
+            marker = malformed.index(b" path=", 512)
+            assert 512 < marker < 1024
+            malformed[512] = ord("0")
+            with (
+                tempfile.TemporaryDirectory() as state,
+                Registry([bytes(malformed)]) as registry,
+            ):
+                rejected = call(
+                    "pull", "--root", state, "--http-loopback", registry.ref, ok=False
+                )
+                assert b"corrupt tar header" in rejected.stderr, rejected.stderr
+                assert not published_roots(state)
+            print("PASS: malformed PAX record rejected without publication")
+            return
+
         for compression, encoded in (
             (1, gzip.compress(layer.read_bytes())),
             (2, zstd_compress(layer.read_bytes())),
@@ -164,6 +251,9 @@ def main():
             assert (compressed_root / "etc/owner").read_bytes() == data
             print(f"PASS: compression {compression} verifies DiffID and extracts")
 
+    for regression in ("fd", "sparse", "pax"):
+        subprocess.run([sys.executable, __file__, f"--{regression}"], check=True)
+
     raw = fixture([file("owner", b"codec fixture\n", 1000, 1001)])
     for media, encoded in (
         (OCI + "layer.v1.tar", raw),
@@ -186,7 +276,7 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 8 and sys.argv[1] == "--worker":
+    if len(sys.argv) in (8, 9) and sys.argv[1] == "--worker":
         worker(
             sys.argv[2],
             sys.argv[3],
@@ -194,6 +284,7 @@ if __name__ == "__main__":
             sys.argv[5],
             int(sys.argv[6]),
             sys.argv[7],
+            int(sys.argv[8]) if len(sys.argv) == 9 else 0,
         )
     else:
         main()
