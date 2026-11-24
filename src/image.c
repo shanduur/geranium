@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <openssl/evp.h>
 #include <skalibs/strerr.h>
 
@@ -319,6 +320,35 @@ static struct response fetch(const struct reference *r, const char *kind,
 	return res;
 }
 
+static void fetch_layer(const struct reference *r, const char *digest,
+			unsigned long long size, int local, char **token,
+			int fd)
+{
+	char url[2048];
+	int n = snprintf(url, sizeof url, "%s://%s/v2/%s/blobs/%s",
+			 local ? "http" : "https", r->host, r->repo, digest);
+
+	if (n < 0 || (size_t)n >= sizeof url)
+		fail("registry URL too long");
+	struct response res =
+		registry_get_to_file(url, *token, local, (size_t)size, fd);
+	if (res.status == 401) {
+		free(*token);
+		*token = registry_token(res.challenge, local);
+		free(res.data);
+		res = registry_get_to_file(url, *token, local, (size_t)size,
+					   fd);
+	}
+	if (res.status != 200) {
+		fprintf(stderr, "geranium image: registry HTTP status %d\n",
+			res.status);
+		geranium_fatal_exit(1);
+	}
+	if (res.size != size || strcmp(res.body_digest, digest) ||
+	    (*res.digest && strcmp(res.digest, res.body_digest)))
+		fail("descriptor digest or size mismatch");
+}
+
 static void verify(struct response *res, const char *digest,
 		   unsigned long long size)
 {
@@ -333,13 +363,12 @@ static void verify(struct response *res, const char *digest,
 }
 
 /* Slots are reserved until ordered extraction, including completed workers.
- * Four workers each own at most LAYER_LIMIT+1 response bytes and, during auth
- * refresh, an additional 1 MiB+1 token response. Four LAYER_LIMIT-sized files
- * bound compressed staging; the parent maps one. Extraction's layer.tar,
- * rootfs, TLS, JSON, inherited metadata and page cache are separate limits,
- * so this is not a bound on total staging or RSS. */
+ * Workers stream with fixed-size buffers; four LAYER_LIMIT-sized files bound
+ * compressed staging. Extraction and page cache are separate resources. */
 #define PULL_SLOTS 4
-#define LAYER_LIMIT (64 * 1024 * 1024)
+/* The extraction limit is 1 GiB; 2 GiB permits incompressible archives and
+ * overhead without a 2 GiB heap allocation in each worker. */
+#define LAYER_LIMIT (2ULL * 1024 * 1024 * 1024)
 
 struct pull_layer {
 	const char *digest, *diff;
@@ -514,13 +543,10 @@ static void pull_spawn(struct pull_slot *slot, unsigned index, unsigned count,
 		close(STDOUT_FILENO);
 		check(sigprocmask(SIG_SETMASK, &previous, NULL),
 		      "worker signal mask");
-		struct response blob = fetch(r, "blobs", layer->digest, local,
-					     &token, LAYER_LIMIT);
+		fetch_layer(r, layer->digest, layer->size, local, &token,
+			    slot->file);
 		layer_progress(index, count, "verifying");
-		verify(&blob, layer->digest, layer->size);
-		write_all(slot->file, blob.data, blob.size);
 		check(fsync(slot->file), "sync downloaded layer");
-		free(blob.data);
 		/* Pipe EOF is the completion event, including fatal helper exits. */
 		_exit(0);
 	}
@@ -591,15 +617,29 @@ static void pull_layers(int root, int stage, const struct reference *r,
 		/* Portable storage still works without unsafe orphanable workers. */
 		for (unsigned i = 0; i < count; i++) {
 			layer_progress(i, count, "downloading");
-			struct response blob = fetch(r, "blobs",
-						     layers[i].digest, local,
-						     token, LAYER_LIMIT);
+			char name[32];
+			(void)snprintf(name, sizeof name, ".layer-%u", i);
+			int file = openat(stage, name,
+					  O_RDWR | O_CREAT | O_EXCL |
+						  O_NOFOLLOW | O_CLOEXEC,
+					  0600);
+			check(file, "stage layer file");
+			fetch_layer(r, layers[i].digest, layers[i].size, local,
+				    token, file);
 			layer_progress(i, count, "verifying");
-			verify(&blob, layers[i].digest, layers[i].size);
+			check(fsync(file), "sync downloaded layer");
+			void *data = mmap(NULL, layers[i].size, PROT_READ,
+					  MAP_PRIVATE, file, 0);
+			if (data == MAP_FAILED)
+				check(-1, "map downloaded layer");
 			layer_progress(i, count, "extracting");
-			layer_apply(root, stage, blob.data, blob.size,
+			layer_apply(root, stage, data, layers[i].size,
 				    layers[i].gzip, layers[i].diff, &expanded);
-			free(blob.data);
+			check(munmap(data, layers[i].size),
+			      "unmap downloaded layer");
+			check(close(file), "close downloaded layer");
+			check(unlinkat(stage, name, 0),
+			      "remove downloaded layer");
 		}
 		return;
 	}
@@ -928,21 +968,34 @@ int image_pull(int state, const char *input, int local_http)
 		dg = json_string(json_get(layer, "digest"));
 		sz = json_uint(json_get(layer, "size"));
 		type = json_string(json_get(layer, "mediaType"));
-		int gzip = media(
-			type, "application/vnd.oci.image.layer.v1.tar+gzip",
-			"application/vnd.docker.image.rootfs.diff.tar.gzip");
-		if (!gzip &&
-		    !media(type, "application/vnd.oci.image.layer.v1.tar",
-			   "application/vnd.docker.image.rootfs.diff.tar"))
+		int compression = 0;
+		if (media(type, "application/vnd.oci.image.layer.v1.tar+gzip",
+			  "application/vnd.docker.image.rootfs.diff.tar.gzip") ||
+		    !strcmp(type,
+			    "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip") ||
+		    !strcmp(type,
+			    "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"))
+			compression = 1;
+		else if (!strcmp(type,
+				 "application/vnd.oci.image.layer.v1.tar+zstd") ||
+			 !strcmp(type,
+				 "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd"))
+			compression = 2;
+		else if (!media(type, "application/vnd.oci.image.layer.v1.tar",
+				"application/vnd.docker.image.rootfs.diff.tar") &&
+			 !strcmp(type,
+				 "application/vnd.oci.image.layer.nondistributable.v1.tar") &&
+			 !strcmp(type,
+				 "application/vnd.docker.image.rootfs.foreign.diff.tar"))
 			fail("unsupported layer mediaType");
-		if (!digest_ok(dg) || sz > 64 * 1024 * 1024 ||
-		    !digest_ok(json_string(diff)))
+		if (!digest_ok(dg) || !sz || sz > LAYER_LIMIT ||
+		    sz > SIZE_MAX || !digest_ok(json_string(diff)))
 			fail("unsupported or excessive layer descriptor");
 		validated[count - 1] = (struct pull_layer){
 			.digest = dg,
 			.diff = json_string(diff),
 			.size = (size_t)sz,
-			.gzip = gzip,
+			.gzip = compression,
 		};
 	}
 	if (yyjson_arr_iter_has_next(&diff_iter))
