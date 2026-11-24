@@ -15,6 +15,7 @@
 #include <strings.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <openssl/evp.h>
 #define HEAD_LIMIT 32768
 #define IDLE_TIMEOUT 30000
 #define BODY_TIMEOUT 300000
@@ -274,7 +275,39 @@ static void validate_headers(const unsigned char *wire, size_t size)
 	}
 }
 
-static struct response request(struct url *u, const char *token, size_t limit)
+static void receive_body(struct connection *c, struct response *r, size_t size,
+			 int fd, EVP_MD_CTX *digest)
+{
+	unsigned char buffer[32768];
+
+	while (size) {
+		size_t wanted = size < sizeof buffer ? size : sizeof buffer;
+		int n = transfer(c, fd < 0 ? r->data + r->size : buffer, wanted,
+				 0);
+
+		if (!n)
+			fail("truncated HTTP body");
+		if (fd >= 0) {
+			if (EVP_DigestUpdate(digest, buffer, (size_t)n) != 1)
+				fail("SHA256 update failed");
+			for (int off = 0; off < n;) {
+				ssize_t written = write(fd, buffer + off,
+							(size_t)(n - off));
+
+				if (written < 0 && errno == EINTR)
+					continue;
+				if (written <= 0)
+					fail("write downloaded layer");
+				off += (int)written;
+			}
+		}
+		r->size += (size_t)n;
+		size -= (size_t)n;
+	}
+}
+
+static struct response request(struct url *u, const char *token, size_t limit,
+			       int fd)
 {
 	struct connection c = connect_url(u);
 	char req[20000];
@@ -372,9 +405,22 @@ static struct response request(struct url *u, const char *token, size_t limit)
 
 	c.end = now() + BODY_TIMEOUT;
 	c.idle = now() + IDLE_TIMEOUT;
-	r.data = malloc(limit + 1);
-	if (!r.data)
-		fail("allocation");
+	int streaming = fd >= 0 && r.status == 200;
+	/* Authentication and redirect bodies are metadata, never layer content. */
+	if (!streaming) {
+		if (fd >= 0)
+			limit = 1024 * 1024;
+		r.data = malloc(limit + 1);
+		if (!r.data)
+			fail("allocation");
+	}
+	EVP_MD_CTX *digest = NULL;
+	if (streaming) {
+		digest = EVP_MD_CTX_new();
+		if (!digest ||
+		    EVP_DigestInit_ex(digest, EVP_sha256(), NULL) != 1)
+			fail("SHA256 initialization failed");
+	}
 	if (*length) {
 		size_t size = 0;
 
@@ -385,15 +431,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 			if (size > limit)
 				fail("response too large");
 		}
-		while (r.size < size) {
-			size_t left = size - r.size;
-			int n = transfer(&c, r.data + r.size,
-					 left > 32768 ? 32768 : left, 0);
-
-			if (!n)
-				fail("truncated HTTP body");
-			r.size += (size_t)n;
-		}
+		receive_body(&c, &r, size, streaming ? fd : -1, digest);
 	} else {
 		if (strcasecmp(encoding, "chunked"))
 			fail("unsupported transfer encoding");
@@ -431,17 +469,7 @@ static struct response request(struct url *u, const char *token, size_t limit)
 			}
 			if (size > limit - r.size)
 				fail("response too large");
-			size_t end = r.size + size;
-			while (r.size < end) {
-				size_t left = end - r.size;
-				int k = transfer(&c, r.data + r.size,
-						 left > 32768 ? 32768 : left,
-						 0);
-
-				if (!k)
-					fail("truncated chunk");
-				r.size += (size_t)k;
-			}
+			receive_body(&c, &r, size, streaming ? fd : -1, digest);
 			char crlf[2];
 			for (int i = 0; i < 2; i++)
 				if (transfer(&c, crlf + i, 1, 0) != 1)
@@ -452,7 +480,20 @@ static struct response request(struct url *u, const char *token, size_t limit)
 				break;
 		}
 	}
-	r.data[r.size] = 0;
+	if (streaming) {
+		unsigned char raw[32];
+		unsigned length = 0;
+
+		if (EVP_DigestFinal_ex(digest, raw, &length) != 1 ||
+		    length != sizeof raw)
+			fail("SHA256 finalization failed");
+		strcpy(r.body_digest, "sha256:");
+		for (unsigned i = 0; i < sizeof raw; i++)
+			(void)sprintf(r.body_digest + 7 + 2 * i, "%02x",
+				      raw[i]);
+		EVP_MD_CTX_free(digest);
+	} else
+		r.data[r.size] = 0;
 
 	free(wire);
 	SSL_free(c.ssl);
@@ -461,14 +502,14 @@ static struct response request(struct url *u, const char *token, size_t limit)
 	return r;
 }
 
-struct response registry_get(const char *url, const char *token, int local,
-			     size_t limit)
+static struct response get(const char *url, const char *token, int local,
+			   size_t limit, int fd)
 {
 	struct url u = parse(url, local);
 	const char *auth = token;
 
 	for (int count = 0; count < 5; count++) {
-		struct response r = request(&u, auth, limit);
+		struct response r = request(&u, auth, limit, fd);
 
 		if (r.status != 301 && r.status != 302 && r.status != 303 &&
 		    r.status != 307 && r.status != 308)
@@ -493,6 +534,18 @@ struct response registry_get(const char *url, const char *token, int local,
 	fail("too many redirects");
 	struct response r = { 0 };
 	return r;
+}
+
+struct response registry_get(const char *url, const char *token, int local,
+			     size_t limit)
+{
+	return get(url, token, local, limit, -1);
+}
+
+struct response registry_get_to_file(const char *url, const char *token,
+				     int local, size_t limit, int fd)
+{
+	return get(url, token, local, limit, fd);
 }
 
 static void query(char *out, size_t cap, const char *s)

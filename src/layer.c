@@ -11,7 +11,12 @@
 #include <errno.h>
 #include <openssl/evp.h>
 #include <zlib.h>
-#define EXPAND_LIMIT (1024ULL * 1024 * 1024)
+#include <archive.h>
+#include <archive_entry.h>
+#include <zstd.h>
+#include <limits.h>
+#define EXPAND_LIMIT (4ULL * 1024 * 1024 * 1024)
+#define ENTRY_LIMIT (1024ULL * 1024 * 1024)
 
 static void fail(const char *s)
 {
@@ -103,39 +108,6 @@ static void erase(int fd, const char *s)
 		check(unlinkat(fd, s, AT_REMOVEDIR), "whiteout rmdir");
 	} else
 		check(unlinkat(fd, s, 0), "whiteout unlink");
-}
-
-static unsigned long long octal(const unsigned char *s, size_t n)
-{
-	unsigned long long v = 0;
-	size_t i = 0;
-
-	while (i < n && s[i] == ' ')
-		i++;
-	for (; i < n && s[i] >= '0' && s[i] <= '7'; i++) {
-		if (v > EXPAND_LIMIT)
-			fail("excessive tar number");
-		v = v * 8 + (s[i] - '0');
-	}
-	for (; i < n; i++)
-		if (s[i] && s[i] != ' ')
-			fail("unsupported tar numeric encoding");
-	return v;
-}
-
-static void field(char *out, size_t cap, const unsigned char *s, size_t n)
-{
-	size_t len = 0;
-
-	while (len < n && s[len])
-		len++;
-	if (len >= cap)
-		fail("tar path too long");
-	memcpy(out, s, len);
-	out[len] = 0;
-	for (size_t i = len; i < n; i++)
-		if (s[i])
-			fail("invalid tar string padding");
 }
 
 /* Normalize only conventional leading ./ and trailing /. Never normalize .. . */
@@ -243,75 +215,94 @@ struct seen_path {
 	struct seen_path *next;
 };
 
-static void extract(int root, int tar, int whiteouts)
+static void extract(int root, int tar, int whiteouts, unsigned *warnings)
 {
-	check((int)lseek(tar, 0, SEEK_SET), "rewind layer");
-	unsigned entries = 0, zeros = 0;
+	struct archive *archive;
+	struct archive_entry *entry;
+	unsigned entries = 0;
 	struct dirmode *modes = NULL;
 	struct seen_path *seen[4096] = { 0 };
 	size_t path_bytes = 0;
+	int input, status;
 
-	for (;;) {
-		unsigned char h[512];
-		ssize_t n = read(tar, h, sizeof h);
-
-		if (n == 0) {
-			if (zeros < 2)
-				fail("missing tar terminator");
-			break;
+	check((int)lseek(tar, 0, SEEK_SET), "rewind layer");
+	input = dup(tar);
+	check(input, "duplicate layer input");
+	archive = archive_read_new();
+	if (!archive ||
+	    archive_read_support_filter_none(archive) != ARCHIVE_OK ||
+	    archive_read_support_format_tar(archive) != ARCHIVE_OK ||
+	    archive_read_open_fd(archive, input, 32768) != ARCHIVE_OK)
+		fail("initialize tar reader");
+	while ((status = archive_read_next_header(archive, &entry)) ==
+		       ARCHIVE_OK ||
+	       status == ARCHIVE_WARN) {
+		/* In the C locale libarchive warns about UTF-8 PAX names while
+		 * retaining their original bytes. Optional metadata warnings do not
+		 * invalidate the entry; all path and payload checks still apply. */
+		if (status == ARCHIVE_WARN && !(*warnings & 16)) {
+			fprintf(stderr,
+				"geranium layer: warning: tar metadata could not "
+				"be fully interpreted; original pathname bytes retained\n");
+			*warnings |= 16;
 		}
-		if (n != 512)
-			fail("truncated tar header");
-		unsigned sum = 0;
-		for (unsigned i = 0; i < 512; i++)
-			sum += h[i];
-		if (!sum) {
-			zeros++;
-			continue;
-		}
+		const char *raw = archive_entry_pathname(entry);
+		const char *target = archive_entry_hardlink(entry);
+		const char *symlink = archive_entry_symlink(entry);
+		la_int64_t length = archive_entry_size(entry);
+		unsigned long long size;
+		mode_t mode = archive_entry_perm(entry);
+		char type;
+		char name[4096], link[4096];
 
-		if (zeros)
-			fail("nonzero tar data after terminator");
 		if (++entries > 100000)
 			fail("too many layer entries");
-		unsigned actual = 0;
-		for (unsigned i = 0; i < 512; i++)
-			actual += (i >= 148 && i < 156) ? ' ' : h[i];
-		if (octal(h + 148, 8) != actual)
-			fail("tar checksum mismatch");
-
-		if (memcmp(h + 257, "ustar", 5))
-			fail("only ustar supported");
-		unsigned long long size = octal(h + 124, 12),
-				   uid = octal(h + 108, 8),
-				   gid = octal(h + 116, 8),
-				   mode = octal(h + 100, 8);
-		char type = (char)h[156];
-		if (!type)
+		if (!raw || strlen(raw) >= sizeof name)
+			fail("tar path too long");
+		strcpy(name, raw);
+		if (length < 0 || (unsigned long long)length > ENTRY_LIMIT)
+			fail("invalid or excessive tar entry size (1 GiB limit)");
+		size = (unsigned long long)length;
+		if (target)
+			type = '1';
+		else if (symlink)
+			type = '2';
+		else if (archive_entry_filetype(entry) == AE_IFDIR)
+			type = '5';
+		else if (archive_entry_filetype(entry) == AE_IFREG)
 			type = '0';
-		if (type != '0' && type != '1' && type != '2' && type != '5')
-			fail("unsupported tar entry (extensions or devices)");
-		if (uid || gid)
-			fail("non-root image ownership unsupported");
-		if (mode > 07777 || (mode & 06000) ||
-		    ((mode & 01000) && type != '5'))
-			fail("unsupported image special mode");
-		if (size > 256ULL * 1024 * 1024 || (type != '0' && size))
-			fail("invalid or excessive tar entry size");
-
-		char name[4096], prefix[156], link[101];
-		field(name, sizeof name, h, 100);
-		field(prefix, sizeof prefix, h + 345, 155);
-		field(link, sizeof link, h + 157, 100);
-		if (*prefix) {
-			char joined[4096];
-			int k = snprintf(joined, sizeof joined, "%s/%s", prefix,
-					 name);
-
-			if (k < 0 || (size_t)k >= sizeof joined)
-				fail("tar path too long");
-			strcpy(name, joined);
+		else
+			type = '?';
+		if (type == '?' && !(*warnings & 4)) {
+			fprintf(stderr,
+				"geranium layer: warning: unsupported device/FIFO/socket entries omitted; no host devices created\n");
+			*warnings |= 4;
 		}
+		if ((archive_entry_uid(entry) || archive_entry_gid(entry)) &&
+		    !(*warnings & 1)) {
+			fprintf(stderr,
+				"geranium layer: warning: image ownership flattened to caller UID/GID (single-ID user namespace)\n");
+			*warnings |= 1;
+		}
+		if ((mode & 06000) && !(*warnings & 2)) {
+			fprintf(stderr,
+				"geranium layer: warning: set-ID permissions stripped (unsafe with flattened ownership)\n");
+			*warnings |= 2;
+		}
+		if (archive_entry_xattr_count(entry) && !(*warnings & 8)) {
+			fprintf(stderr,
+				"geranium layer: warning: image extended attributes omitted\n");
+			*warnings |= 8;
+		}
+		mode &= ~06000;
+		if (type != '5')
+			mode &= ~01000;
+		if (type != '0' && size)
+			fail("unexpected payload in non-file tar entry");
+		const char *rawlink = target ? target : symlink;
+		if (rawlink && strlen(rawlink) >= sizeof link)
+			fail("tar link too long");
+		strcpy(link, rawlink ? rawlink : "");
 		path(name, type == '5');
 
 		unsigned bucket = 2166136261U;
@@ -334,15 +325,8 @@ static void extract(int root, int tar, int whiteouts)
 		record->next = seen[bucket];
 		seen[bucket] = record;
 
-		off_t data = lseek(tar, 0, SEEK_CUR);
-		if (data < 0)
-			fail("tar seek");
-		struct stat tst;
-		check(fstat(tar, &tst), "tar stat");
-		unsigned long long padded = (size + 511) / 512 * 512;
-		if ((unsigned long long)data + padded >
-		    (unsigned long long)tst.st_size)
-			fail("truncated tar payload");
+		if (type == '0' && size > ENTRY_LIMIT)
+			fail("tar file exceeds 1 GiB limit");
 
 		if (!*name) {
 			if (type != '5')
@@ -356,7 +340,7 @@ static void extract(int root, int tar, int whiteouts)
 			int wh = !strncmp(last, ".wh.", 4);
 			if (wh && (type != '0' || size))
 				fail("invalid whiteout");
-			if (wh == whiteouts) {
+			if (wh == whiteouts && type != '?') {
 				char full[4096];
 
 				strcpy(full, name);
@@ -427,10 +411,8 @@ static void extract(int root, int tar, int whiteouts)
 					      "hardlink target");
 					if (!S_ISREG(st.st_mode) ||
 					    st.st_uid != geteuid() ||
-					    st.st_gid != getegid() ||
-					    (st.st_mode & 07777) !=
-						    (mode_t)mode)
-						fail("unsupported hardlink target identity or mode");
+					    st.st_gid != getegid())
+						fail("unsafe hardlink target identity or type");
 					struct stat current;
 					if (fstatat(fd, leaf, &current,
 						    AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -467,8 +449,8 @@ static void extract(int root, int tar, int whiteouts)
 							left > sizeof buf ?
 								sizeof buf :
 								(size_t)left;
-						ssize_t got =
-							read(tar, buf, want);
+						ssize_t got = archive_read_data(
+							archive, buf, want);
 
 						if (got <= 0)
 							fail("truncated tar file");
@@ -483,9 +465,13 @@ static void extract(int root, int tar, int whiteouts)
 				parent_close(&chain);
 			}
 		}
-		if (lseek(tar, data + (off_t)padded, SEEK_SET) < 0)
-			fail("tar seek payload");
+		if (archive_read_data_skip(archive) != ARCHIVE_OK)
+			fail("corrupt or truncated tar payload");
 	}
+	if (status != ARCHIVE_EOF)
+		fail("corrupt tar header");
+	if (archive_read_free(archive) != ARCHIVE_OK)
+		fail("close tar reader");
 
 	for (unsigned i = 0; i < 4096; i++)
 		while (seen[i]) {
@@ -513,8 +499,20 @@ static void extract(int root, int tar, int whiteouts)
 	}
 }
 
-void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
-		 const char *diff, unsigned long long *expanded)
+static void staged_bytes(int tar, EVP_MD_CTX *md, const void *data, size_t n,
+			 unsigned long long *expanded)
+{
+	if (n > EXPAND_LIMIT - *expanded)
+		fail("expanded image exceeds 4 GiB; use smaller layers/images");
+	*expanded += n;
+	write_all(tar, data, n);
+	if (!EVP_DigestUpdate(md, data, n))
+		fail("digest update");
+}
+
+void layer_apply(int root, int stage, const void *bytes, size_t size,
+		 enum layer_compression compression, const char *diff,
+		 unsigned long long *expanded)
 {
 	int tar = openat(stage, "layer.tar",
 			 O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -524,9 +522,11 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 	EVP_MD_CTX *md = EVP_MD_CTX_new();
 	if (!md || !EVP_DigestInit_ex(md, EVP_sha256(), NULL))
 		fail("digest initialization");
-	if (gzip) {
+	if (compression == LAYER_GZIP) {
 		z_stream z;
 
+		if (size > UINT_MAX)
+			fail("gzip layer exceeds compressed input limit");
 		memset(&z, 0, sizeof z);
 		if (inflateInit2(&z, 15 + 16) != Z_OK)
 			fail("gzip initialization");
@@ -542,25 +542,39 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 			if (status != Z_OK && status != Z_STREAM_END)
 				fail("corrupt or truncated gzip");
 			size_t n = sizeof out - z.avail_out;
-			*expanded += n;
-			if (*expanded > EXPAND_LIMIT)
-				fail("expanded image exceeds 1 GiB");
-			write_all(tar, out, n);
-			if (!EVP_DigestUpdate(md, out, n))
-				fail("digest update");
+			staged_bytes(tar, md, out, n, expanded);
 			if (!n && !z.avail_in && status != Z_STREAM_END)
 				fail("truncated gzip");
 		} while (status != Z_STREAM_END);
 		if (z.avail_in)
 			fail("gzip trailing data or concatenation unsupported");
 		inflateEnd(&z);
+	} else if (compression == LAYER_ZSTD) {
+		ZSTD_DStream *stream = ZSTD_createDStream();
+		ZSTD_inBuffer input = { bytes, size, 0 };
+		size_t need;
+
+		if (!stream || ZSTD_isError(ZSTD_initDStream(stream)))
+			fail("zstd initialization");
+		do {
+			unsigned char output[32768];
+			ZSTD_outBuffer out = { output, sizeof output, 0 };
+			size_t before = input.pos;
+
+			need = ZSTD_decompressStream(stream, &out, &input);
+			if (ZSTD_isError(need))
+				fail("corrupt zstd layer");
+			staged_bytes(tar, md, output, out.pos, expanded);
+			if (need && input.pos == size && !out.pos)
+				fail("truncated zstd layer");
+			if (need && before == input.pos && !out.pos)
+				fail("stalled zstd layer");
+		} while (need || input.pos < size);
+		ZSTD_freeDStream(stream);
+	} else if (compression == LAYER_TAR) {
+		staged_bytes(tar, md, bytes, size, expanded);
 	} else {
-		*expanded += size;
-		if (*expanded > EXPAND_LIMIT)
-			fail("expanded image exceeds 1 GiB");
-		write_all(tar, bytes, size);
-		if (!EVP_DigestUpdate(md, bytes, size))
-			fail("digest update");
+		fail("unsupported layer compression");
 	}
 
 	unsigned char d[32];
@@ -576,8 +590,10 @@ void layer_apply(int root, int stage, const void *bytes, size_t size, int gzip,
 	if (strcmp(text, diff))
 		fail("layer DiffID mismatch");
 
-	extract(root, tar, 1);
-	extract(root, tar, 0);
+	unsigned warnings = 0;
+
+	extract(root, tar, 1, &warnings);
+	extract(root, tar, 0, &warnings);
 	close(tar);
 	check(unlinkat(stage, "layer.tar", 0), "remove staged layer");
 }

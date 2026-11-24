@@ -54,14 +54,25 @@ not promise full rootfs crash durability.
 Registry requests verify HTTPS and constrain redirects and authentication tokens.
 Pull verifies descriptor sizes, content digests, and uncompressed layer DiffIDs
 before publishing an image. Extraction applies whiteouts and rejects filesystem
-traversal and unsupported ownership or metadata.
+traversal. libarchive handles tar/PAX/GNU headers. zlib and Zstandard decode
+compressed layers before DiffID verification. Unsupported ownership, set-ID bits,
+extended attributes, and special files produce explicit adaptation warnings.
 
-Linux downloads layers with bounded, short-lived workers. The parent applies
-layers in manifest order and owns publication. Failure cancels and reaps its
-workers before releasing the image lock.
+Linux downloads layers into staged files with bounded, short-lived workers. The
+parent applies layers in manifest order and owns publication. Failure cancels
+and reaps its workers before releasing the image lock.
+
+The Linux runtime installs a private procfs and tmpfs-backed `/dev`, with a small
+set of individual device binds, a private devpts instance, and shared-memory tmpfs.
+It never binds the host device directory. `/tmp` remains part of the container's
+persistent filesystem. Image-controlled mountpoint symlinks are rejected.
 
 Saved image configuration supplies command defaults, environment, and working
-directory. Unsupported platforms or configuration fail before execution.
+directory. Missing HOME/PATH receive container defaults (`/root` and the standard
+system search path); explicit values, including empty ones, take precedence. The
+manager's environment is never passed through. Unsupported platforms or invalid
+executable configuration fail before execution. Unsupported optional runtime
+metadata warns without blocking pull.
 Accepting OCI images does not imply full OCI runtime conformance.
 
 ## Portability and boundaries

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-apk add --no-cache build-base binutils bmake busybox-static python3 openssl-dev openssl-libs-static zlib-dev zlib-static yyjson-dev skalibs-dev ca-certificates openssl
+apk add --no-cache build-base binutils bmake busybox-static python3 openssl-dev openssl-libs-static zlib-dev zlib-static libarchive-dev zstd-dev yyjson-dev skalibs-dev ca-certificates openssl
 mkdir /tmp/geranium-build
 cp -R /src/. /tmp/geranium-build/
 cd /tmp/geranium-build
@@ -25,6 +25,7 @@ if readelf -d "$GERANIUM_TEST_BUSYBOX" | grep NEEDED; then exit 1; fi
 # Root must exercise the actual TLS default port, not just remapped authorities.
 GERANIUM_REQUIRE_DEFAULT_HOST=1 bmake test
 sh tests/public-image.sh
+python3 tests/public-compat.py
 bmake install DESTDIR=/tmp/geranium-install PREFIX='/opt/geranium space'
 mv /tmp/geranium-install /tmp/geranium-moved
 unset LD_LIBRARY_PATH
@@ -33,5 +34,5 @@ for v in create start run stop inspect logs rm pull rmi; do
 done
 adduser -D runner
 chown -R runner:runner /tmp/geranium-build
-su runner -c 'cd /tmp/geranium-build && GERANIUM_TEST_BUSYBOX=/bin/busybox.static bmake test && sh tests/public-image.sh'
+su runner -c 'cd /tmp/geranium-build && GERANIUM_TEST_BUSYBOX=/bin/busybox.static bmake test && sh tests/public-image.sh && python3 tests/public-compat.py'
 su runner -c 'unset LD_LIBRARY_PATH; for v in create start run stop inspect logs rm pull rmi; do "/tmp/geranium-moved/opt/geranium space/bin/gu-$v" --help || exit; done'

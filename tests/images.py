@@ -743,7 +743,7 @@ def parallel_validation():
             elif kind == "last-digest":
                 m["layers"][-1]["digest"] = "sha256:bad"
             elif kind == "last-size":
-                m["layers"][-1]["size"] = 64 * 1024 * 1024 + 1
+                m["layers"][-1]["size"] = 2 * 1024 * 1024 * 1024 + 1
             else:
                 m["layers"] = [m["layers"][0]] * 129
                 diffs = [diffs[0]] * 129
@@ -1569,7 +1569,6 @@ def reject_layers():
         tar([("/absolute", b"bad")]),
         tar([("dir", ("/tmp",)), ("dir/escape", b"bad")]),
         tar([("alias", ("hardlink", "../escape"))]),
-        tar([("setid", b"bad", 0o4755)]),
     ]
     for layer in bad:
         with tempfile.TemporaryDirectory() as w, Registry([layer]) as r:
@@ -1580,24 +1579,62 @@ def reject_layers():
                 if not p.name.startswith(".")
             ]
             print("unsafe layer rejected:", p.stderr.decode().strip())
-    # Tar extensions and multi-user IDs must be rejected, never ignored.
-    for kind in ("pax", "owner", "device"):
-        out = io.BytesIO()
-        with tarfile.open(
-            fileobj=out,
-            mode="w",
-            format=tarfile.PAX_FORMAT if kind == "pax" else tarfile.USTAR_FORMAT,
-        ) as t:
-            ti = tarfile.TarInfo("long/" + "a" * 150 if kind == "pax" else "entry")
-            if kind == "owner":
-                ti.uid = 1
-            if kind == "device":
-                ti.type = tarfile.CHRTYPE
-            t.addfile(ti)
-        with tempfile.TemporaryDirectory() as w, Registry([out.getvalue()]) as r:
-            call("pull", "--root", w, "--http-loopback", r.ref, ok=False)
     print(
-        "traversal, symlink-parent escape, hardlink escape, set-ID, PAX, devices and multi-user ownership rejection PASS"
+        "traversal, symlink-parent escape, hardlink escape and duplicate rejection PASS"
+    )
+
+
+def flattened_ownership():
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as t:
+        entry = tarfile.TarInfo("etc/nonroot")
+        entry.uid = 1000
+        entry.gid = 1001
+        entry.mode = 0o640
+        data = b"alpine-like non-root file\n"
+        entry.size = len(data)
+        t.addfile(entry, io.BytesIO(data))
+    with tempfile.TemporaryDirectory() as w, Registry([out.getvalue()]) as r:
+        p = call("pull", "--root", w, "--http-loopback", r.ref)
+        file = published_roots(w)[0] / "etc/nonroot"
+        assert file.read_bytes() == data
+        assert file.stat().st_mode & 0o7777 == 0o640
+        assert (file.stat().st_uid, file.stat().st_gid) == (os.geteuid(), os.getegid())
+        assert p.stderr.count(b"image ownership flattened") == 1, p.stderr
+    print("non-root OCI ownership flattened with explicit warning PASS")
+
+
+def common_tar_extensions():
+    for format in (tarfile.PAX_FORMAT, tarfile.GNU_FORMAT):
+        longname = "nested/" + "a" * 150 + "/payload"
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode="w", format=format) as t:
+            original = tarfile.TarInfo(longname)
+            original.uid, original.gid = 42, 17
+            original.mode = 0o4755
+            original.size = len(b"payload")
+            t.addfile(original, io.BytesIO(b"payload"))
+            hardlink = tarfile.TarInfo("nested/hardlink")
+            hardlink.type = tarfile.LNKTYPE
+            hardlink.linkname = longname
+            hardlink.mode = 0o644  # Hardlink header mode need not match target.
+            t.addfile(hardlink)
+            device = tarfile.TarInfo("nested/device")
+            device.type = tarfile.CHRTYPE
+            t.addfile(device)
+        with tempfile.TemporaryDirectory() as w, Registry([out.getvalue()]) as r:
+            p = call("pull", "--root", w, "--http-loopback", r.ref)
+            root = published_roots(w)[0]
+            file = root / longname
+            assert file.read_bytes() == b"payload"
+            assert file.stat().st_mode & 0o7777 == 0o755
+            assert (root / "nested/hardlink").stat().st_ino == file.stat().st_ino
+            assert not (root / "nested/device").exists()
+            assert p.stderr.count(b"image ownership flattened") == 1, p.stderr
+            assert p.stderr.count(b"set-ID") == 1, p.stderr
+            assert b"no host devices created" in p.stderr, p.stderr
+    print(
+        "PAX/GNU long names and hardlinks, flattened ownership, set-ID and devices PASS"
     )
 
 
@@ -1652,7 +1689,7 @@ def integrity():
                 elif kind == "platform":
                     c["os"] = "darwin"
                 elif kind == "user":
-                    c["config"]["User"] = "1000"
+                    c["config"]["User"] = 1000
                 d = encode(c)
                 r.blobs[digest(d)] = d
                 m["config"] = descriptor(d, OCI + "config.v1+json")
@@ -1836,7 +1873,7 @@ def plain_bounds():
                 entry = tarfile.TarInfo(
                     "large" if kind == "file-size" else "/".join(["a"] * 33)
                 )
-                entry.size = 256 * 1024 * 1024 + 1 if kind == "file-size" else 0
+                entry.size = 1024 * 1024 * 1024 + 1 if kind == "file-size" else 0
                 t.addfile(entry)
             with Registry([out.getvalue()]) as r:
                 p = call(
@@ -2371,6 +2408,8 @@ CASES = (
     "layers",
     "lower_directories",
     "reject_layers",
+    "flattened_ownership",
+    "common_tar_extensions",
     "integrity",
     "partial",
     "lifecycle",

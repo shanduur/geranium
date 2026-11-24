@@ -8,10 +8,13 @@ struct response {
 	size_t size;
 	int status;
 	char location[4096], challenge[8192], type[256], digest[128];
+	char body_digest[72];
 };
 
 struct response registry_get(const char *url, const char *token, int local,
 			     size_t limit);
+struct response registry_get_to_file(const char *url, const char *token,
+				     int local, size_t limit, int fd);
 char *registry_token(const char *challenge, int local);
 
 #endif

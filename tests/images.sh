@@ -10,6 +10,12 @@ case "$diagnostic" in *'request deadline'*) ;; *) printf '%s\n' "$diagnostic"; e
 case "$diagnostic" in *'positive I/O progress'*) ;; *) printf '%s\n' "$diagnostic"; exit 1;; esac
 printf '%s\n' 'body progress cannot extend the hard deadline PASS'
 python3 tests/image-selectors.py
+python3 tests/image-large.py
+python3 tests/image-streaming.py
+python3 tests/layer-compat.py
+python3 tests/image-warnings.py
+python3 tests/image-unicode.py
+python3 tests/image-environment.py
 python3 tests/required-default-host.py
 for behavior in $(python3 tests/images.py --list); do
     python3 tests/images.py "$behavior"

@@ -14,13 +14,13 @@ trap 'rm -rf "$work"' 0 1 2 3 15
 python3 tests/image-platform-fixture.py "$work"
 "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 -fPIC -c src/backend_unsupported.c -o "$work/unknown.o"
 mkdir "$work/unknown"
-"${CC:-cc}" ${CFLAGS--O2 -Wall -Wextra -Werror} ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map -o "$work/unknown/libgeranium.so" geranium.o image.o registry.o json.o layer.o "$work/unknown.o" fatal.o ${LDLIBS:-} -lssl -lcrypto -lz -lyyjson -lskarnet
+"${CC:-cc}" ${CFLAGS--O2 -Wall -Wextra -Werror} ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map -o "$work/unknown/libgeranium.so" geranium.o image.o registry.o json.o layer.o "$work/unknown.o" fatal.o ${LDLIBS:-} -lssl -lcrypto -lz -larchive -lzstd -lyyjson -lskarnet
 "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -Wno-error=unused-function -std=c99 -o "$work/unknown/gu-pull" src/pull.c ${LDFLAGS:-} -L"$work/unknown" -Wl,-rpath,"$work/unknown" -lgeranium ${LDLIBS:-}
 for arch in riscv64 ppc64le s390x; do
     mkdir "$work/$arch"
     "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 -fPIC -c "$work/$arch.c" -o "$work/$arch/dispatcher.o"
     "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 -o "$work/$arch/probe" tests/image-platform-backend.c "$work/$arch/dispatcher.o" "$work/backend-native.o"
-    "${CC:-cc}" ${CFLAGS--O2 -Wall -Wextra -Werror} ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map -o "$work/$arch/libgeranium.so" geranium.o image.o registry.o json.o layer.o "$work/backend-native.o" "$work/$arch/dispatcher.o" fatal.o ${LDLIBS:-} -lssl -lcrypto -lz -lyyjson -lskarnet
+    "${CC:-cc}" ${CFLAGS--O2 -Wall -Wextra -Werror} ${LDFLAGS:-} -shared -Wl,-soname,libgeranium.so -Wl,--version-script,src/geranium.map -o "$work/$arch/libgeranium.so" geranium.o image.o registry.o json.o layer.o "$work/backend-native.o" "$work/$arch/dispatcher.o" fatal.o ${LDLIBS:-} -lssl -lcrypto -lz -larchive -lzstd -lyyjson -lskarnet
     for name in pull create; do
         "${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -Wno-error=unused-function -std=c99 -o "$work/$arch/gu-$name" "src/$name.c" ${LDFLAGS:-} -L"$work/$arch" -Wl,-rpath,"$work/$arch" -lgeranium ${LDLIBS:-}
     done

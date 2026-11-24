@@ -4,7 +4,7 @@ w=$(mktemp -d)
 trap 'rm -rf "$w"' 0
 mkdir -p "$w/fs/bin"
 cp "${GERANIUM_TEST_BUSYBOX:-$(command -v busybox)}" "$w/fs/bin/busybox"
-"${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 tests/startup-cancel.c ${LDFLAGS:-} ${LDLIBS:-} -lssl -lcrypto -lz -o "$w/check"
+"${CC:-cc}" ${CPPFLAGS:-} ${CFLAGS--O2 -Wall -Wextra -Werror} -std=c99 tests/startup-cancel.c ${LDFLAGS:-} ${LDLIBS:-} -lssl -lcrypto -lz -larchive -lzstd -o "$w/check"
 sh tests/fault-command.sh "$w/run" run tests/preexec-stall.c -Wl,--wrap=setpgid
 for mode in foreground detached timeout; do
     "$w/check" "$w/run" "$w/state" "$w/fs" "$mode"

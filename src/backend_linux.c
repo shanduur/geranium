@@ -246,6 +246,70 @@ int backend_watch_parent(int parent_pid)
 	return 0;
 }
 
+/* Do not follow image-controlled symlinks while preparing mountpoints. */
+static int runtime_dir(const char *path, mode_t mode)
+{
+	int created = mkdir(path, mode) == 0;
+	if (!created && errno != EEXIST)
+		fail(path);
+	struct stat st;
+	if (lstat(path, &st) < 0)
+		fail(path);
+	if (!S_ISDIR(st.st_mode)) {
+		errno = ENOTDIR;
+		fail(path);
+	}
+	return created;
+}
+
+static void runtime_device(const char *name)
+{
+	char target[64];
+	char source[64];
+	int n = snprintf(target, sizeof target, "dev/%s", name);
+	if (n < 0 || (size_t)n >= sizeof target) {
+		errno = ENAMETOOLONG;
+		fail("device path");
+	}
+	n = snprintf(source, sizeof source, "/dev/%s", name);
+	if (n < 0 || (size_t)n >= sizeof source) {
+		errno = ENAMETOOLONG;
+		fail("device path");
+	}
+	int fd = open(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	must(fd, target);
+	must(close(fd), target);
+	must(mount(source, target, NULL, MS_BIND, NULL), target);
+}
+
+static void runtime_filesystems(void)
+{
+	runtime_dir("dev", 0755);
+	must(mount("tmpfs", "dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755"),
+	     "mount dev");
+	runtime_device("null");
+	runtime_device("zero");
+	runtime_device("full");
+	runtime_device("random");
+	runtime_device("urandom");
+	runtime_device("tty");
+	runtime_dir("dev/pts", 0755);
+	must(mount("devpts", "dev/pts", "devpts", MS_NOSUID | MS_NOEXEC,
+		   "newinstance,mode=0620,ptmxmode=0666"),
+	     "mount devpts");
+	must(symlink("pts/ptmx", "dev/ptmx"), "symlink dev ptmx");
+	runtime_dir("dev/shm", 01777);
+	must(mount("tmpfs", "dev/shm", "tmpfs",
+		   MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777"),
+	     "mount dev shm");
+	must(symlink("/proc/self/fd", "dev/fd"), "symlink dev fd");
+	must(symlink("/proc/self/fd/0", "dev/stdin"), "symlink dev stdin");
+	must(symlink("/proc/self/fd/1", "dev/stdout"), "symlink dev stdout");
+	must(symlink("/proc/self/fd/2", "dev/stderr"), "symlink dev stderr");
+	if (runtime_dir("tmp", 01777))
+		must(chmod("tmp", 01777), "chmod tmp");
+}
+
 int backend_enter(const char *rootfs)
 {
 	uid_t uid = getuid();
@@ -273,6 +337,11 @@ int backend_enter(const char *rootfs)
 	must(mount(rootfs, rootfs, NULL, MS_BIND | MS_REC, NULL),
 	     "bind rootfs");
 	must(chdir(rootfs), "chdir rootfs");
+	runtime_dir("proc", 0555);
+	must(mount("proc", "proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC,
+		   NULL),
+	     "mount proc");
+	runtime_filesystems();
 
 	/* Stack the old root on the new root, then detach it without scratch data. */
 	must((int)syscall(SYS_pivot_root, ".", "."), "pivot_root");

@@ -9,6 +9,8 @@ cat > "$work/compiler" <<'WRAP'
 set -eu
 case "$DEPENDENCY_NAME" in
     getopt_long) library=; header=getopt.h;;
+    libarchive) library=-larchive; header=archive.h;;
+    zstd) library=-lzstd; header=zstd.h;;
     yyjson) library=-lyyjson; header=yyjson.h;;
     skalibs) library=-lskarnet; header=skalibs/strerr.h;;
 esac
@@ -28,7 +30,7 @@ done
 "$DEPENDENCY_REAL_CC" "$@"
 WRAP
 chmod +x "$work/compiler"
-for dependency in getopt_long yyjson skalibs; do
+for dependency in getopt_long libarchive zstd yyjson skalibs; do
     missing_kinds='header library'
     requirement='development library required'
     if [ "$dependency" = getopt_long ]; then
@@ -48,4 +50,4 @@ for dependency in getopt_long yyjson skalibs; do
         test ! -e "$work/Makefile"
     done
 done
-echo 'missing getopt_long header and yyjson/skalibs headers and libraries rejected independently PASS'
+echo 'missing getopt_long header and libarchive/zstd/yyjson/skalibs headers and libraries rejected independently PASS'
