@@ -15,6 +15,8 @@
 #include <archive_entry.h>
 #include <zstd.h>
 #include <limits.h>
+#include <locale.h>
+#include <langinfo.h>
 #define EXPAND_LIMIT (4ULL * 1024 * 1024 * 1024)
 #define ENTRY_LIMIT (1024ULL * 1024 * 1024)
 
@@ -215,6 +217,35 @@ struct seen_path {
 	struct seen_path *next;
 };
 
+/* libarchive accepts EOF without two zero blocks and can read ahead on input. */
+static void check_tar_end(struct archive *archive, int tar)
+{
+	la_int64_t end = archive_filter_bytes(archive, 0);
+	la_int64_t terminator = archive_read_header_position(archive);
+	struct stat st;
+	unsigned char buf[32768];
+
+	check(fstat(tar, &st), "tar size");
+	if (end < 1024 || end % 512 || end > st.st_size ||
+	    terminator != end - 1024)
+		fail("invalid tar terminator");
+	for (off_t pos = (off_t)end - 1024; pos < st.st_size;) {
+		size_t want = st.st_size - pos > (off_t)sizeof buf ?
+				      sizeof buf :
+				      (size_t)(st.st_size - pos);
+		ssize_t n = pread(tar, buf, want, pos);
+
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			fail("read tar terminator");
+		for (ssize_t i = 0; i < n; i++)
+			if (buf[i])
+				fail("invalid tar terminator");
+		pos += n;
+	}
+}
+
 static void extract(int root, int tar, int whiteouts, unsigned *warnings,
 		    unsigned long long *output_total)
 {
@@ -225,7 +256,16 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings,
 	struct seen_path *seen[4096] = { 0 };
 	size_t path_bytes = 0;
 	int input, status;
+	locale_t utf8, previous;
 
+	/* libarchive 3.7.7 replaces unrepresentable PAX names with '*'
+	 * without warning. Keep only this extraction's CTYPE UTF-8. */
+	utf8 = newlocale(LC_CTYPE_MASK, "C.UTF-8", (locale_t)0);
+	if (!utf8 || strcmp(nl_langinfo_l(CODESET, utf8), "UTF-8"))
+		fail("UTF-8 locale required for tar extraction");
+	previous = uselocale(utf8);
+	if (!previous)
+		fail("select tar extraction locale");
 	check((int)lseek(tar, 0, SEEK_SET), "rewind layer");
 	input = dup(tar);
 	check(input, "duplicate layer input");
@@ -355,7 +395,7 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings,
 			int wh = !strncmp(last, ".wh.", 4);
 			if (wh && (type != '0' || size))
 				fail("invalid whiteout");
-			if (wh == whiteouts && type != '?') {
+			if (wh == whiteouts) {
 				char full[4096];
 
 				strcpy(full, name);
@@ -374,6 +414,8 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings,
 							fail("unsafe whiteout");
 						erase(fd, target);
 					}
+				} else if (type == '?') {
+					erase(fd, leaf);
 				} else if (type == '5') {
 					struct stat st;
 
@@ -488,8 +530,12 @@ static void extract(int root, int tar, int whiteouts, unsigned *warnings,
 	}
 	if (status != ARCHIVE_EOF)
 		fail("corrupt tar header");
+	check_tar_end(archive, tar);
 	if (archive_read_free(archive) != ARCHIVE_OK)
 		fail("close tar reader");
+	if (!uselocale(previous))
+		fail("restore tar extraction locale");
+	freelocale(utf8);
 	check(close(input), "close layer input");
 
 	for (unsigned i = 0; i < 4096; i++)

@@ -56,6 +56,110 @@ def file(name, data, uid=0, gid=0, mode=0o644):
     return info, data
 
 
+def tar_end_regression():
+    raw = fixture([file("kept", b"one")])
+    end = raw.index(bytes(1024), 1024)
+    zero_data = bytes(1024)
+    zero_raw = fixture([file("zero-data", zero_data)], format=tarfile.USTAR_FORMAT)
+    zero_end = 512 + len(zero_data)  # USTAR header and aligned file payload.
+    assert zero_raw[zero_end : zero_end + 1024] == bytes(1024)
+    cases = {
+        "missing": raw[:end],
+        "single-zero": raw[: end + 512],
+        "nonzero-padding": raw[: end + 1024] + b"x" + bytes(511),
+        "early-zero": raw[: end + 512] + b"x" + bytes(511) + raw[end + 1024 :],
+        "zero-data-missing": zero_raw[:zero_end],
+        "zero-data-single-zero": zero_raw[: zero_end + 512],
+        "zero-data-dirty-trailer": zero_raw[: zero_end + 1024] + b"x" + bytes(511),
+    }
+    for name, malformed in cases.items():
+        for media, encode_layer in (
+            (OCI + "layer.v1.tar", lambda data: data),
+            (OCI + "layer.v1.tar+gzip", gzip.compress),
+            (OCI + "layer.v1.tar+zstd", zstd_compress),
+        ):
+            encoded = encode_layer(malformed)
+            with (
+                tempfile.TemporaryDirectory() as state,
+                Registry([malformed]) as registry,
+            ):
+                document = json.loads(registry.manifest)
+                identity = digest(encoded)
+                registry.blobs[identity] = encoded
+                document["layers"][0].update(
+                    mediaType=media, digest=identity, size=len(encoded)
+                )
+                registry.manifest = encode(document)
+                rejected = call(
+                    "pull", "--root", state, "--http-loopback", registry.ref, ok=False
+                )
+                assert b"invalid tar terminator" in rejected.stderr, (
+                    name,
+                    media,
+                    rejected.stderr,
+                )
+                assert not published_roots(state), (name, media)
+    with tempfile.TemporaryDirectory() as state, Registry([raw]) as registry:
+        call("pull", "--root", state, "--http-loopback", registry.ref)
+        assert (published_roots(state)[0] / "kept").read_bytes() == b"one"
+    for media, encode_layer in (
+        (OCI + "layer.v1.tar", lambda data: data),
+        (OCI + "layer.v1.tar+gzip", gzip.compress),
+        (OCI + "layer.v1.tar+zstd", zstd_compress),
+    ):
+        encoded = encode_layer(zero_raw)
+        with tempfile.TemporaryDirectory() as state, Registry([zero_raw]) as registry:
+            document = json.loads(registry.manifest)
+            identity = digest(encoded)
+            registry.blobs[identity] = encoded
+            document["layers"][0].update(
+                mediaType=media, digest=identity, size=len(encoded)
+            )
+            registry.manifest = encode(document)
+            call("pull", "--root", state, "--http-loopback", registry.ref)
+            assert (published_roots(state)[0] / "zero-data").read_bytes() == zero_data
+    print(
+        "PASS: raw/gzip/zstd strict tar ends reject without publication; standard and zero-filled tar pass"
+    )
+
+
+def special_replacement_regression():
+    link = tarfile.TarInfo("symlink")
+    link.type = tarfile.SYMTYPE
+    link.linkname = "regular"
+    lower = fixture(
+        [
+            file("regular", b"old regular"),
+            (link, b""),
+            file("directory/child", b"old child"),
+        ]
+    )
+    special = []
+    for name, kind in (
+        ("regular", tarfile.FIFOTYPE),
+        ("symlink", tarfile.CHRTYPE),
+        ("directory", tarfile.FIFOTYPE),
+    ):
+        entry = tarfile.TarInfo(name)
+        entry.type = kind
+        special.append((entry, b""))
+    with (
+        tempfile.TemporaryDirectory() as state,
+        Registry([lower, fixture(special)]) as registry,
+    ):
+        result = call("pull", "--root", state, "--http-loopback", registry.ref)
+        root = published_roots(state)[0]
+        for name in ("regular", "symlink", "directory"):
+            assert not (root / name).is_symlink(), name
+            assert not (root / name).exists(), name
+        assert result.stderr.count(b"unsupported device/FIFO/socket") == 1, (
+            result.stderr
+        )
+    print(
+        "PASS: FIFO/device replacement removes regular, symlink and directory; no special node created"
+    )
+
+
 def worker(libpath, rootpath, stagepath, layerpath, compression, rawpath, preseed=0):
     library = ctypes.CDLL(libpath)
     library.layer_apply.argtypes = [
@@ -223,6 +327,14 @@ def main():
             print("PASS: malformed PAX record rejected without publication")
             return
 
+        if len(sys.argv) == 2 and sys.argv[1] == "--terminator":
+            tar_end_regression()
+            return
+
+        if len(sys.argv) == 2 and sys.argv[1] == "--special":
+            special_replacement_regression()
+            return
+
         for compression, encoded in (
             (1, gzip.compress(layer.read_bytes())),
             (2, zstd_compress(layer.read_bytes())),
@@ -251,7 +363,7 @@ def main():
             assert (compressed_root / "etc/owner").read_bytes() == data
             print(f"PASS: compression {compression} verifies DiffID and extracts")
 
-    for regression in ("fd", "sparse", "pax"):
+    for regression in ("fd", "sparse", "pax", "terminator", "special"):
         subprocess.run([sys.executable, __file__, f"--{regression}"], check=True)
 
     raw = fixture([file("owner", b"codec fixture\n", 1000, 1001)])

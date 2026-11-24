@@ -34,9 +34,13 @@ def main():
             tempfile.TemporaryDirectory() as state,
             Registry([output.getvalue()]) as registry,
         ):
-            call("pull", "--root", state, "--http-loopback", registry.ref)
+            result = call("pull", "--root", state, "--http-loopback", registry.ref)
             roots = published_roots(state)
             assert len(roots) == 1
+            assert (roots[0] / name).is_file(), (
+                result.stderr,
+                [os.fsencode(str(p)) for p in roots[0].rglob("*")],
+            )
             assert (roots[0] / name).read_bytes() == data
             assert os.readlink(roots[0] / "symlink") == name
             assert (roots[0] / "symlink").read_bytes() == data
@@ -45,6 +49,26 @@ def main():
                 roots[0] / name
             ).stat().st_ino
     print("PAX/GNU UTF-8 and USTAR byte filenames and links preserved in C locale PASS")
+
+    for field in ("uname", "gname"):
+        output = io.BytesIO()
+        with tarfile.open(
+            fileobj=output, mode="w", format=tarfile.PAX_FORMAT
+        ) as archive:
+            entry = tarfile.TarInfo("owner.txt")
+            entry.uid = entry.gid = 0
+            setattr(entry, field, "André")
+            entry.size = 5
+            archive.addfile(entry, io.BytesIO(b"owner"))
+        with (
+            tempfile.TemporaryDirectory() as state,
+            Registry([output.getvalue()]) as registry,
+        ):
+            call("pull", "--root", state, "--http-loopback", registry.ref)
+            roots = published_roots(state)
+            assert len(roots) == 1
+            assert (roots[0] / "owner.txt").read_bytes() == b"owner"
+    print("PAX Unicode uname/gname with numeric ownership preserved PASS")
 
 
 if __name__ == "__main__":
